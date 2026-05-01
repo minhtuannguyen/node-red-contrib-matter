@@ -8,7 +8,7 @@
  */
 import "@matter/nodejs";
 
-import { mkdirSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { CommissioningController } from "@project-chip/matter.js";
@@ -113,7 +113,17 @@ export interface ClusterInfo {
   clusterName: string;
   attributes: string[];
   commands: string[];
+  events: string[];
 }
+
+export interface DeviceRegistryEntry {
+  label: string;
+  nodeId: string;
+  discoveredAt: string;
+  discovery: DeviceDescription;
+}
+
+export type DeviceRegistry = Record<string, DeviceRegistryEntry>;
 
 export interface EndpointInfo {
   endpointId: number;
@@ -183,6 +193,10 @@ export class ControllerManager {
   /** nodeId -> event handlers */
   private readonly eventHandlers = new Map<string, Set<EventTriggeredHandler>>();
 
+  /** Persisted registry of commissioned devices with their discovery data */
+  private registry: DeviceRegistry = {};
+  private registryPath = "";
+
   private constructor(
     private readonly storagePath: string,
     private readonly port: number,
@@ -224,6 +238,9 @@ export class ControllerManager {
     // with ENOENT. Pre-create the full path including the controller-id subdir.
     const CONTROLLER_ID = "node-red-matter";
     mkdirSync(join(this.storagePath, CONTROLLER_ID), { recursive: true });
+
+    this.registryPath = join(this.storagePath, CONTROLLER_ID, "registry.json");
+    this.loadRegistry();
 
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { Environment } = require("@matter/general") as typeof import("@matter/general");
@@ -299,7 +316,12 @@ export class ControllerManager {
     const nodeId = await ctrl.commissionNode(options as never);
     logger.info(`Commissioned node: ${nodeId}`);
 
-    return this.buildNodeInfo(await this.getOrConnectNode(nodeId.toString(), false));
+    const nodeInfo = this.buildNodeInfo(await this.getOrConnectNode(nodeId.toString(), false));
+    // Auto-discover and register in background — don't block the commission response.
+    this.registerDevice(nodeInfo.nodeId).catch(e =>
+      logger.warn(`Device registration failed for ${nodeInfo.nodeId}: ${e}`),
+    );
+    return nodeInfo;
   }
 
   // ----------- Node access -----------------------------------------------
@@ -436,6 +458,8 @@ export class ControllerManager {
         const clusterId   = client.id as number;
         const attributes  = Object.keys(client.attributes);
         const commands    = Object.keys(client.commands);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const events      = client.events ? Object.keys((client as any).events) : [];
 
         clusters.push({
           clusterId,
@@ -443,6 +467,7 @@ export class ControllerManager {
           clusterName:  CLUSTER_NAMES[clusterId] ?? `Unknown (0x${clusterId.toString(16).padStart(4, "0")})`,
           attributes,
           commands,
+          events,
         });
       }
 
@@ -549,6 +574,88 @@ export class ControllerManager {
       },
     });
     logger.info(`Subscribed to all attributes and events for node ${nodeIdStr}`);
+  }
+
+  // ----------- Device registry -------------------------------------------
+
+  /**
+   * Returns the persisted registry of commissioned devices with their discovery data.
+   * Used by the Node-RED admin UI to populate cascading dropdowns.
+   */
+  getRegistry(): DeviceRegistry {
+    return this.registry;
+  }
+
+  /**
+   * Decommissions a node from the Matter fabric and removes it from the local
+   * registry.
+   *
+   * @param nodeIdStr  Decimal node ID string
+   * @param force      When true, skips fabric-level decommissioning and only
+   *                   erases local storage (use when the device is unreachable).
+   *                   Default: false (attempts proper decommissioning first).
+   */
+  async removeDevice(nodeIdStr: string, force = false): Promise<void> {
+    await this.start();
+    const ctrl = this.requireController();
+    const nodeId = NodeId(BigInt(nodeIdStr));
+
+    // Clean up any active subscriptions / handlers before removing
+    this.connectedNodes.delete(nodeIdStr);
+    this.attrHandlers.delete(nodeIdStr);
+    this.eventHandlers.delete(nodeIdStr);
+
+    // tryDecommissioning = !force: properly removes the fabric entry on the
+    // device when reachable; falls back to local-only removal on error.
+    await ctrl.removeNode(nodeId, !force);
+
+    // Remove from registry and persist
+    delete this.registry[nodeIdStr];
+    this.saveRegistrySync();
+    logger.info(`Removed device ${nodeIdStr} (force=${force})`);
+  }
+
+  /**
+   * Discovers a commissioned device and persists the result in the registry.
+   * Called automatically after commissioning; can also be triggered manually.
+   */
+  async registerDevice(nodeIdStr: string): Promise<void> {
+    const node = await this.getOrConnectNode(nodeIdStr, false);
+
+    // Try to read productName from BasicInformation cluster (cluster 0x0028).
+    let label = "Device";
+    try {
+      const rootEp = node.getRootEndpoint();
+      const biClient = rootEp?.getClusterClientById(ClusterId(0x0028));
+      if (biClient?.attributes?.["productName"]) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const name = await (biClient.attributes["productName"] as any).get(false);
+        if (name) label = String(name);
+      }
+    } catch { /* fall back to default label */ }
+
+    const discovery = await this.discoverDevice(nodeIdStr);
+    this.registry[nodeIdStr] = { label, nodeId: nodeIdStr, discoveredAt: new Date().toISOString(), discovery };
+    this.saveRegistrySync();
+    logger.info(`Registered device ${nodeIdStr} as "${label}"`);
+  }
+
+  private loadRegistry(): void {
+    try {
+      const data = readFileSync(this.registryPath, "utf8");
+      this.registry = JSON.parse(data) as DeviceRegistry;
+      logger.info(`Loaded device registry — ${Object.keys(this.registry).length} entries`);
+    } catch {
+      this.registry = {};
+    }
+  }
+
+  private saveRegistrySync(): void {
+    try {
+      writeFileSync(this.registryPath, JSON.stringify(this.registry, null, 2), "utf8");
+    } catch (e) {
+      logger.warn(`Failed to save device registry: ${e}`);
+    }
   }
 
   private buildNodeInfo(node: PairedNode): NodeInfo {

@@ -1,0 +1,139 @@
+<script type="text/javascript">
+(function () {
+  function fillSel(sel, opts, curVal) {
+    sel.empty();
+    opts.forEach(function (o) { sel.append($('<option>').val(o.v).text(o.t)); });
+    if (curVal !== undefined && curVal !== null && String(curVal) !== '') sel.val(String(curVal));
+  }
+
+  RED.nodes.registerType('matter-decommission', {
+    category:    'matter',
+    color:       '#E06C6C',
+    defaults: {
+      name:       { value: '' },
+      controller: { value: '', type: 'matter-controller', required: true },
+      nodeId:     { value: '' },
+      force:      { value: false }
+    },
+    inputs:  1,
+    outputs: 1,
+    icon:    'font-awesome/fa-unlink',
+    label: function () {
+      return this.name || (this.nodeId ? 'decommission ' + this.nodeId : 'Decommission Device');
+    },
+    paletteLabel: 'decommission',
+    oneditprepare: function () {
+      var self = this;
+      var registry = {};
+
+      function loadRegistry(ctrlId) {
+        if (!ctrlId) {
+          registry = {};
+          fillSel($('#nr-md-device'), [{ v: '', t: '— select a controller first —' }]);
+          return;
+        }
+        fillSel($('#nr-md-device'), [{ v: '', t: '— loading… —' }]);
+        $.getJSON('/matter-nodes/' + ctrlId + '/registry')
+          .done(function (reg) {
+            registry = reg || {};
+            var devOpts = [{ v: '', t: '— select device —' }];
+            Object.values(registry).forEach(function (e) { devOpts.push({ v: e.nodeId, t: e.label + ' (' + e.nodeId + ')' }); });
+            fillSel($('#nr-md-device'), devOpts, $('#node-input-nodeId').val());
+          })
+          .fail(function (jqXHR) {
+            registry = {};
+            var hint = jqXHR.status === 0 ? 'cannot reach Node-RED'
+              : 'deploy the flow first, then re-open this dialog';
+            fillSel($('#nr-md-device'), [{ v: '', t: '— could not load registry (' + hint + ') —' }]);
+          });
+      }
+
+      // Controller change reloads registry
+      $('#node-input-controller').on('change', function () { loadRegistry($(this).val()); });
+
+      // Device selection fills nodeId text input
+      $('#nr-md-device').on('change', function () {
+        var nodeId = $(this).val();
+        if (nodeId) $('#node-input-nodeId').val(nodeId);
+      });
+
+      loadRegistry(self.controller);
+    }
+  });
+})();
+</script>
+
+<script type="text/html" data-template-name="matter-decommission">
+  <div class="form-row">
+    <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+    <input type="text" id="node-input-name" placeholder="Decommission Device">
+  </div>
+
+  <div class="form-row">
+    <label for="node-input-controller"><i class="fa fa-cog"></i> Controller</label>
+    <input type="text" id="node-input-controller">
+  </div>
+
+  <div class="form-row">
+    <label><i class="fa fa-microchip"></i> Device</label>
+    <select id="nr-md-device" style="width:70%">
+      <option value="">— select device —</option>
+    </select>
+  </div>
+
+  <div class="form-row">
+    <label for="node-input-nodeId"><i class="fa fa-hashtag"></i> Node ID</label>
+    <input type="text" id="node-input-nodeId" placeholder="e.g. 7825526669137635300">
+    <div class="form-tips">
+      Decimal node ID. Populated automatically when you select a device above.
+      Can be overridden at runtime via <code>msg.payload.nodeId</code>.
+    </div>
+  </div>
+
+  <div class="form-row">
+    <label for="node-input-force"><i class="fa fa-exclamation-triangle"></i> Force</label>
+    <input type="checkbox" id="node-input-force" style="width:auto; margin-top:0">
+    <span style="margin-left:8px; color:#888; font-size:0.9em">
+      Force-remove without contacting the device (use when device is offline or factory-reset).
+      The device will need to be manually factory-reset if unchecked removal fails.
+    </span>
+  </div>
+  <div class="form-tips" style="margin-top:-8px">
+    Can be overridden at runtime via <code>msg.payload.force</code> (boolean).
+  </div>
+</script>
+
+<script type="text/html" data-help-name="matter-decommission">
+  <p>Decommission (unpair) a Matter device from the controller fabric and remove it from the registry.</p>
+
+  <h3>Input</h3>
+  <dl class="message-properties">
+    <dt>payload.nodeId <span class="property-type">string</span></dt>
+    <dd>Decimal node ID of the device to remove. Overrides the value set in the node config.</dd>
+    <dt>payload.force <span class="property-type">boolean</span></dt>
+    <dd>
+      When <code>true</code>, skips sending the decommission command to the device and only
+      erases local storage. Use when the device is unreachable. Default: <code>false</code>.
+    </dd>
+  </dl>
+
+  <h3>Output</h3>
+  <dl class="message-properties">
+    <dt>payload <span class="property-type">object</span></dt>
+    <dd><code>{ ok: true, nodeId, force }</code></dd>
+    <dt>topic <span class="property-type">string</span></dt>
+    <dd><code>"decommissioned"</code></dd>
+  </dl>
+
+  <h3>Details</h3>
+  <p>
+    By default (Force unchecked) the node sends a <em>RemoveFabric</em> command to the device,
+    which cleanly removes this controller from its fabric, then erases local commissioning
+    data and the registry entry.
+  </p>
+  <p>
+    Enable <strong>Force</strong> when the device is offline or has already been factory-reset.
+    In this case only the local data is removed; the device may still think it is commissioned
+    until it is factory-reset.
+  </p>
+</script>

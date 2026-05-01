@@ -2,6 +2,21 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 const controller_manager_js_1 = require("../../lib/controller-manager.js");
 module.exports = function (RED) {
+    // HTTP admin endpoint — serves the device registry so node edit UIs can
+    // populate cascading dropdowns without manual copy-paste of IDs.
+    // No extra auth guard needed: the route is on httpAdmin (admin-only port)
+    // and returns only read-only device metadata.
+    RED.httpAdmin.get("/matter-nodes/:id/registry", (req, res) => {
+        const ctrl = RED.nodes.getNode(req.params["id"]);
+        // Return empty registry (200) when the controller node isn't in the
+        // runtime yet (e.g. flow not deployed). The UI will show an empty
+        // device list rather than an error, which is less confusing.
+        if (!ctrl?.manager) {
+            res.json({});
+            return;
+        }
+        res.json(ctrl.manager.getRegistry());
+    });
     function MatterController(config) {
         RED.nodes.createNode(this, config);
         const storagePath = config.storagePath || `${process.env["HOME"]}/.node-red-matter`;

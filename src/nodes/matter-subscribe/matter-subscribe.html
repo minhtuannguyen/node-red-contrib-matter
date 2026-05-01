@@ -1,5 +1,202 @@
 <script type="text/javascript">
+(function () {
+  function fillSel(sel, opts, curVal) {
+    sel.empty();
+    opts.forEach(function (o) { sel.append($('<option>').val(o.v).text(o.t)); });
+    if (curVal !== undefined && curVal !== null && String(curVal) !== '') sel.val(String(curVal));
+  }
+
   RED.nodes.registerType('matter-subscribe', {
+    category:    'matter',
+    color:       '#7CBBDE',
+    defaults: {
+      name:          { value: '' },
+      controller:    { value: '', type: 'matter-controller', required: true },
+      nodeId:        { value: '', required: true },
+      endpointId:    { value: '' },
+      clusterId:     { value: '' },
+      attributeName: { value: '' },
+      eventName:     { value: '' }
+    },
+    inputs:  0,
+    outputs: 1,
+    icon:    'font-awesome/fa-bell',
+    label: function () {
+      if (this.name) return this.name;
+      var filters = [this.attributeName, this.eventName].filter(Boolean).join(', ');
+      return filters ? 'subscribe: ' + filters : 'subscribe: node ' + (this.nodeId || '?');
+    },
+    paletteLabel: 'subscribe',
+    oneditprepare: function () {
+      var self = this;
+      var registry = {};
+
+      function syncDevice() {
+        var nodeId = $('#nr-ms-device').val();
+        if (nodeId) $('#node-input-nodeId').val(nodeId);
+        var entry = registry[nodeId];
+        var epOpts = [{ v: '', t: '— all endpoints —' }];
+        if (entry) entry.discovery.endpoints.forEach(function (e) {
+          epOpts.push({ v: String(e.endpointId), t: 'Endpoint ' + e.endpointId });
+        });
+        fillSel($('#nr-ms-endpoint'), epOpts, $('#node-input-endpointId').val());
+        $('#nr-ms-endpoint').prop('disabled', !entry);
+        syncEndpoint();
+      }
+
+      function syncEndpoint() {
+        var epId = $('#nr-ms-endpoint').val();
+        $('#node-input-endpointId').val(epId);   // empty = no filter
+        var nodeId = $('#nr-ms-device').val();
+        var entry = registry[nodeId];
+        var ep = epId !== '' && entry && entry.discovery.endpoints.find(function (e) { return String(e.endpointId) === String(epId); });
+        var clOpts = [{ v: '', t: '— all clusters —' }];
+        if (ep) ep.clusters.forEach(function (c) { clOpts.push({ v: c.clusterIdHex, t: c.clusterName + ' (' + c.clusterIdHex + ')' }); });
+        var curCl = String($('#node-input-clusterId').val() || '').replace(/^0x/i, '').toUpperCase().padStart(4, '0');
+        if (curCl === '0000') curCl = '';
+        fillSel($('#nr-ms-cluster'), clOpts, curCl);
+        $('#nr-ms-cluster').prop('disabled', !ep);
+        syncCluster();
+      }
+
+      function syncCluster() {
+        var clHex = String($('#nr-ms-cluster').val() || '');
+        $('#node-input-clusterId').val(clHex);   // empty = no filter
+        var nodeId = $('#nr-ms-device').val();
+        var epId = $('#nr-ms-endpoint').val();
+        var entry = registry[nodeId];
+        var ep = epId !== '' && entry && entry.discovery.endpoints.find(function (e) { return String(e.endpointId) === String(epId); });
+        var cl = clHex && ep && ep.clusters.find(function (c) { return c.clusterIdHex === clHex; });
+        var attrOpts = [{ v: '', t: '— all attributes —' }];
+        if (cl) cl.attributes.forEach(function (a) { attrOpts.push({ v: a, t: a }); });
+        fillSel($('#nr-ms-attribute'), attrOpts, $('#node-input-attributeName').val());
+        $('#nr-ms-attribute').prop('disabled', !cl);
+        var evtOpts = [{ v: '', t: '— all events —' }];
+        if (cl && cl.events) cl.events.forEach(function (e) { evtOpts.push({ v: e, t: e }); });
+        fillSel($('#nr-ms-event'), evtOpts, $('#node-input-eventName').val());
+        $('#nr-ms-event').prop('disabled', !cl || !cl.events || !cl.events.length);
+      }
+
+      $('#nr-ms-device').on('change', syncDevice);
+      $('#nr-ms-endpoint').on('change', syncEndpoint);
+      $('#nr-ms-cluster').on('change', syncCluster);
+      $('#nr-ms-attribute').on('change', function () { $('#node-input-attributeName').val($(this).val()); });
+      $('#nr-ms-event').on('change', function () { $('#node-input-eventName').val($(this).val()); });
+
+      function loadRegistry(ctrlId) {
+        if (!ctrlId) {
+          registry = {};
+          fillSel($('#nr-ms-device'), [{ v: '', t: '— select a controller first —' }]);
+          syncDevice();
+          return;
+        }
+        fillSel($('#nr-ms-device'), [{ v: '', t: '— loading… —' }]);
+        $.getJSON('/matter-nodes/' + ctrlId + '/registry')
+          .done(function (reg) {
+            registry = reg || {};
+            var devOpts = [{ v: '', t: '— select commissioned device —' }];
+            Object.values(registry).forEach(function (e) { devOpts.push({ v: e.nodeId, t: e.label + ' (' + e.nodeId + ')' }); });
+            fillSel($('#nr-ms-device'), devOpts, $('#node-input-nodeId').val());
+            syncDevice();
+          })
+          .fail(function (jqXHR) {
+            registry = {};
+            var hint = jqXHR.status === 0 ? 'cannot reach Node-RED'
+              : 'deploy the flow first, then re-open this dialog';
+            fillSel($('#nr-ms-device'), [{ v: '', t: '— could not load registry (' + hint + ') —' }]);
+            syncDevice();
+          });
+      }
+
+      $('#node-input-controller').on('change', function () { loadRegistry($(this).val()); });
+      loadRegistry(self.controller);
+    }
+  });
+}());
+</script>
+
+<script type="text/html" data-template-name="matter-subscribe">
+  <div class="form-row">
+    <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+    <input type="text" id="node-input-name" placeholder="Matter Subscribe">
+  </div>
+  <div class="form-row">
+    <label for="node-input-controller"><i class="fa fa-cog"></i> Controller</label>
+    <input type="text" id="node-input-controller">
+  </div>
+
+  <div class="form-tips" style="margin: 8px 0 4px 0">Select device (required) and optional filters:</div>
+  <div class="form-row">
+    <label><i class="fa fa-microchip"></i> Device</label>
+    <select id="nr-ms-device" style="width:70%"><option value="">— loading… —</option></select>
+  </div>
+  <div class="form-row">
+    <label><i class="fa fa-sitemap"></i> Endpoint filter</label>
+    <select id="nr-ms-endpoint" style="width:70%" disabled><option value="">— all endpoints —</option></select>
+  </div>
+  <div class="form-row">
+    <label><i class="fa fa-cubes"></i> Cluster filter</label>
+    <select id="nr-ms-cluster" style="width:70%" disabled><option value="">— all clusters —</option></select>
+  </div>
+  <div class="form-row">
+    <label><i class="fa fa-database"></i> Attribute filter</label>
+    <select id="nr-ms-attribute" style="width:70%" disabled><option value="">— all attributes —</option></select>
+  </div>
+  <div class="form-row">
+    <label><i class="fa fa-bell"></i> Event filter</label>
+    <select id="nr-ms-event" style="width:70%" disabled><option value="">— all events —</option></select>
+  </div>
+
+  <div class="form-tips" style="margin: 8px 0 4px 0">Or enter manually (overridable via <code>msg</code> at runtime):</div>
+  <div class="form-row">
+    <label for="node-input-nodeId"><i class="fa fa-microchip"></i> Node ID</label>
+    <input type="text" id="node-input-nodeId" placeholder="decimal node ID" required>
+  </div>
+  <div class="form-row">
+    <label for="node-input-endpointId"><i class="fa fa-sitemap"></i> Endpoint filter</label>
+    <input type="text" id="node-input-endpointId" placeholder="(all endpoints)">
+  </div>
+  <div class="form-row">
+    <label for="node-input-clusterId"><i class="fa fa-cubes"></i> Cluster filter (hex)</label>
+    <input type="text" id="node-input-clusterId" placeholder="e.g. 0101 (all clusters)">
+  </div>
+  <div class="form-row">
+    <label for="node-input-attributeName"><i class="fa fa-database"></i> Attribute filter</label>
+    <input type="text" id="node-input-attributeName" placeholder="e.g. lockState (all attributes)">
+  </div>
+  <div class="form-row">
+    <label for="node-input-eventName"><i class="fa fa-bell"></i> Event filter</label>
+    <input type="text" id="node-input-eventName" placeholder="e.g. lockOperation (all events)">
+  </div>
+</script>
+
+<script type="text/html" data-help-name="matter-subscribe">
+  <p>Subscribe to real-time attribute changes and events from a commissioned Matter device.</p>
+  <h3>Output</h3>
+  <dl class="message-properties">
+    <dt>payload.type <span class="property-type">string</span></dt>
+    <dd><code>"attribute"</code> or <code>"event"</code></dd>
+    <dt>payload.nodeId <span class="property-type">string</span></dt>
+    <dd>Matter Node ID (decimal string)</dd>
+    <dt>payload.endpointId <span class="property-type">number</span></dt>
+    <dt>payload.clusterId <span class="property-type">number</span></dt>
+    <dt>payload.attributeName / payload.eventName <span class="property-type">string</span></dt>
+    <dt>payload.value <span class="property-type">any</span></dt>
+    <dd>Decoded attribute value (for attribute changes)</dd>
+    <dt>payload.events <span class="property-type">array</span></dt>
+    <dd>Decoded event data (for events)</dd>
+    <dt>payload.timestamp <span class="property-type">string</span></dt>
+    <dd>ISO-8601 timestamp</dd>
+    <dt>topic <span class="property-type">string</span></dt>
+    <dd>Attribute or event name</dd>
+  </dl>
+  <h3>Details</h3>
+  <p>
+    On deploy, this node connects to the specified Matter device and establishes
+    a subscription. The Matter device pushes changes in real time — no polling occurs.
+  </p>
+</script>
+
     category:    'matter',
     color:       '#7CBBDE',
     defaults: {

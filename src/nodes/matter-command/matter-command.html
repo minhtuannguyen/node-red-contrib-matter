@@ -1,5 +1,174 @@
 <script type="text/javascript">
+(function () {
+  function fillSel(sel, opts, curVal) {
+    sel.empty();
+    opts.forEach(function (o) { sel.append($('<option>').val(o.v).text(o.t)); });
+    if (curVal !== undefined && curVal !== null && String(curVal) !== '') sel.val(String(curVal));
+  }
+
   RED.nodes.registerType('matter-command', {
+    category:    'matter',
+    color:       '#7CBBDE',
+    defaults: {
+      name:        { value: '' },
+      controller:  { value: '', type: 'matter-controller', required: true },
+      nodeId:      { value: '' },
+      endpointId:  { value: '1' },
+      clusterId:   { value: '' },
+      commandName: { value: '' }
+    },
+    inputs:  1,
+    outputs: 1,
+    icon:    'font-awesome/fa-bolt',
+    label: function () { return this.name || (this.commandName ? 'cmd: ' + this.commandName : 'Matter Command'); },
+    paletteLabel: 'command',
+    oneditprepare: function () {
+      var self = this;
+      var registry = {};
+
+      function syncDevice() {
+        var nodeId = $('#nr-mc-device').val();
+        if (nodeId) $('#node-input-nodeId').val(nodeId);
+        var entry = registry[nodeId];
+        var epOpts = [{ v: '', t: '— select endpoint —' }];
+        if (entry) entry.discovery.endpoints.forEach(function (e) {
+          epOpts.push({ v: String(e.endpointId), t: 'Endpoint ' + e.endpointId });
+        });
+        fillSel($('#nr-mc-endpoint'), epOpts, $('#node-input-endpointId').val());
+        $('#nr-mc-endpoint').prop('disabled', !entry);
+        syncEndpoint();
+      }
+
+      function syncEndpoint() {
+        var epId = $('#nr-mc-endpoint').val();
+        if (epId !== '') $('#node-input-endpointId').val(epId);
+        var nodeId = $('#nr-mc-device').val();
+        var entry = registry[nodeId];
+        var ep = entry && entry.discovery.endpoints.find(function (e) { return String(e.endpointId) === String(epId); });
+        var clOpts = [{ v: '', t: '— select cluster —' }];
+        if (ep) ep.clusters.forEach(function (c) { clOpts.push({ v: c.clusterIdHex, t: c.clusterName + ' (' + c.clusterIdHex + ')' }); });
+        var curCl = String($('#node-input-clusterId').val() || '').replace(/^0x/i, '').toUpperCase().padStart(4, '0');
+        fillSel($('#nr-mc-cluster'), clOpts, curCl);
+        $('#nr-mc-cluster').prop('disabled', !ep);
+        syncCluster();
+      }
+
+      function syncCluster() {
+        var clHex = String($('#nr-mc-cluster').val() || '');
+        if (clHex) $('#node-input-clusterId').val(clHex);
+        var nodeId = $('#nr-mc-device').val();
+        var epId = $('#nr-mc-endpoint').val();
+        var entry = registry[nodeId];
+        var ep = entry && entry.discovery.endpoints.find(function (e) { return String(e.endpointId) === String(epId); });
+        var cl = ep && ep.clusters.find(function (c) { return c.clusterIdHex === clHex; });
+        var cmdOpts = [{ v: '', t: '— select command —' }];
+        if (cl) cl.commands.forEach(function (cmd) { cmdOpts.push({ v: cmd, t: cmd }); });
+        fillSel($('#nr-mc-command'), cmdOpts, $('#node-input-commandName').val());
+        $('#nr-mc-command').prop('disabled', !cl || !cl.commands.length);
+      }
+
+      $('#nr-mc-device').on('change', syncDevice);
+      $('#nr-mc-endpoint').on('change', syncEndpoint);
+      $('#nr-mc-cluster').on('change', syncCluster);
+      $('#nr-mc-command').on('change', function () { $('#node-input-commandName').val($(this).val()); });
+
+      function loadRegistry(ctrlId) {
+        if (!ctrlId) {
+          registry = {};
+          fillSel($('#nr-mc-device'), [{ v: '', t: '— select a controller first —' }]);
+          syncDevice();
+          return;
+        }
+        fillSel($('#nr-mc-device'), [{ v: '', t: '— loading… —' }]);
+        $.getJSON('/matter-nodes/' + ctrlId + '/registry')
+          .done(function (reg) {
+            registry = reg || {};
+            var devOpts = [{ v: '', t: '— select commissioned device —' }];
+            Object.values(registry).forEach(function (e) { devOpts.push({ v: e.nodeId, t: e.label + ' (' + e.nodeId + ')' }); });
+            fillSel($('#nr-mc-device'), devOpts, $('#node-input-nodeId').val());
+            syncDevice();
+          })
+          .fail(function (jqXHR) {
+            registry = {};
+            var hint = jqXHR.status === 0 ? 'cannot reach Node-RED'
+              : 'deploy the flow first, then re-open this dialog';
+            fillSel($('#nr-mc-device'), [{ v: '', t: '— could not load registry (' + hint + ') —' }]);
+            syncDevice();
+          });
+      }
+
+      $('#node-input-controller').on('change', function () { loadRegistry($(this).val()); });
+      loadRegistry(self.controller);
+    }
+  });
+}());
+</script>
+
+<script type="text/html" data-template-name="matter-command">
+  <div class="form-row">
+    <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+    <input type="text" id="node-input-name" placeholder="Matter Command">
+  </div>
+  <div class="form-row">
+    <label for="node-input-controller"><i class="fa fa-cog"></i> Controller</label>
+    <input type="text" id="node-input-controller">
+  </div>
+
+  <div class="form-tips" style="margin: 8px 0 4px 0">Select from commissioned devices:</div>
+  <div class="form-row">
+    <label><i class="fa fa-microchip"></i> Device</label>
+    <select id="nr-mc-device" style="width:70%"><option value="">— loading… —</option></select>
+  </div>
+  <div class="form-row">
+    <label><i class="fa fa-sitemap"></i> Endpoint</label>
+    <select id="nr-mc-endpoint" style="width:70%" disabled><option value="">—</option></select>
+  </div>
+  <div class="form-row">
+    <label><i class="fa fa-cubes"></i> Cluster</label>
+    <select id="nr-mc-cluster" style="width:70%" disabled><option value="">—</option></select>
+  </div>
+  <div class="form-row">
+    <label><i class="fa fa-play"></i> Command</label>
+    <select id="nr-mc-command" style="width:70%" disabled><option value="">—</option></select>
+  </div>
+
+  <div class="form-tips" style="margin: 8px 0 4px 0">Or enter manually (also overridable via <code>msg</code> at runtime):</div>
+  <div class="form-row">
+    <label for="node-input-nodeId"><i class="fa fa-microchip"></i> Node ID</label>
+    <input type="text" id="node-input-nodeId" placeholder="decimal node ID">
+  </div>
+  <div class="form-row">
+    <label for="node-input-endpointId"><i class="fa fa-sitemap"></i> Endpoint</label>
+    <input type="number" id="node-input-endpointId" placeholder="1" min="0">
+  </div>
+  <div class="form-row">
+    <label for="node-input-clusterId"><i class="fa fa-cubes"></i> Cluster (hex)</label>
+    <input type="text" id="node-input-clusterId" placeholder="0101">
+  </div>
+  <div class="form-row">
+    <label for="node-input-commandName"><i class="fa fa-play"></i> Command</label>
+    <input type="text" id="node-input-commandName" placeholder="e.g. lockDoor">
+  </div>
+</script>
+
+<script type="text/html" data-help-name="matter-command">
+  <p>Send a cluster command to a commissioned Matter device.</p>
+  <h3>Input</h3>
+  <dl class="message-properties">
+    <dt>payload <span class="property-type">object</span></dt>
+    <dd>Command arguments (e.g. <code>{}</code> for commands with no parameters).</dd>
+    <dt class="optional">nodeId / endpointId / clusterId / commandName <span class="property-type">string</span></dt>
+    <dd>Override the configured values at runtime.</dd>
+  </dl>
+  <h3>Output</h3>
+  <dl class="message-properties">
+    <dt>payload <span class="property-type">any</span></dt>
+    <dd>Command response (or <code>null</code> for void commands).</dd>
+    <dt>topic <span class="property-type">string</span></dt>
+    <dd>The command name that was invoked.</dd>
+  </dl>
+</script>
+
     category:    'matter',
     color:       '#7CBBDE',
     defaults: {

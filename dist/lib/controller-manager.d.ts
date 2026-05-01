@@ -14,7 +14,15 @@ export interface ClusterInfo {
     clusterName: string;
     attributes: string[];
     commands: string[];
+    events: string[];
 }
+export interface DeviceRegistryEntry {
+    label: string;
+    nodeId: string;
+    discoveredAt: string;
+    discovery: DeviceDescription;
+}
+export type DeviceRegistry = Record<string, DeviceRegistryEntry>;
 export interface EndpointInfo {
     endpointId: number;
     clusterIds: number[];
@@ -62,6 +70,9 @@ export declare class ControllerManager {
     private readonly attrHandlers;
     /** nodeId -> event handlers */
     private readonly eventHandlers;
+    /** Persisted registry of commissioned devices with their discovery data */
+    private registry;
+    private registryPath;
     private constructor();
     static getInstance(storagePath: string, port: number): ControllerManager;
     static removeInstance(storagePath: string): void;
@@ -118,6 +129,28 @@ export declare class ControllerManager {
     private requireController;
     private ensureSubscribed;
     private activateSubscriptions;
+    /**
+     * Returns the persisted registry of commissioned devices with their discovery data.
+     * Used by the Node-RED admin UI to populate cascading dropdowns.
+     */
+    getRegistry(): DeviceRegistry;
+    /**
+     * Decommissions a node from the Matter fabric and removes it from the local
+     * registry.
+     *
+     * @param nodeIdStr  Decimal node ID string
+     * @param force      When true, skips fabric-level decommissioning and only
+     *                   erases local storage (use when the device is unreachable).
+     *                   Default: false (attempts proper decommissioning first).
+     */
+    removeDevice(nodeIdStr: string, force?: boolean): Promise<void>;
+    /**
+     * Discovers a commissioned device and persists the result in the registry.
+     * Called automatically after commissioning; can also be triggered manually.
+     */
+    registerDevice(nodeIdStr: string): Promise<void>;
+    private loadRegistry;
+    private saveRegistrySync;
     private buildNodeInfo;
     private getOrCreateHandlerSet;
 }

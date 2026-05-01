@@ -10,9 +10,11 @@ Built on [matter.js](https://github.com/project-chip/matter.js) (`@project-chip/
 ## Features
 
 - **Commission** any Matter device into your own fabric (multi-admin alongside Apple Home, Google Home, etc.)
+- **Device registry** — after commissioning, devices are auto-discovered and stored; all other nodes show a **device dropdown** instead of requiring manual ID entry
 - **Send commands** to any cluster and endpoint (lock/unlock, on/off, scenes, …)
 - **Read attributes** on demand (lock state, brightness, temperature, …)
 - **Subscribe** to real-time attribute changes and events
+- **Decommission** devices cleanly from the fabric, or force-remove when offline
 - Works on **Raspberry Pi** (Ethernet or WiFi) and any Node.js-capable Linux/macOS host
 - Thread devices reachable via a Thread Border Router (HomePod, Apple TV, OTBR)
 
@@ -39,7 +41,6 @@ npm install github:minhtuannguyen/node-red-contrib-matter
 ### From a local clone
 
 ```bash
-# On the target machine:
 git clone https://github.com/minhtuannguyen/node-red-contrib-matter.git
 cd ~/.node-red
 npm install ../node-red-contrib-matter
@@ -65,15 +66,19 @@ Shared configuration node. Manages the Matter controller lifecycle — one per N
 
 | Property | Description | Default |
 |---|---|---|
-| Storage Path | Directory where fabric credentials are persisted | `~/.node-red-matter` |
+| Storage Path | Directory where fabric credentials and device registry are persisted | `~/.node-red-matter` |
 | UDP Port | Matter controller port | `5540` |
 | Log Level | matter.js log verbosity | `Info` |
+
+The controller also serves an internal HTTP endpoint (`GET /matter-nodes/:id/registry`) used by the edit dialogs of all other nodes to populate their device dropdowns. This requires the controller node to be **deployed** before opening any other node's edit dialog.
 
 ---
 
 ### `matter-commission`
 
 Commission a Matter device into the Node-RED controller fabric.
+
+After successful commissioning the device is **automatically registered** in the device registry so it immediately appears in the dropdowns of the command, read, subscribe, and decommission nodes.
 
 **Input `msg.payload`:**
 
@@ -95,7 +100,7 @@ Commission a Matter device into the Node-RED controller fabric.
 
 ### `matter-discover`
 
-Discovers all endpoints, clusters, attributes, and commands of a commissioned device. Use this once after commissioning to learn what the device supports.
+Discovers all endpoints, clusters, attributes, commands, and events of a commissioned device and **saves the result to the device registry**. Run this node once after commissioning (or any time you want to refresh the registry) so the dropdowns in the other nodes reflect the device's current structure.
 
 **Input:** any message (triggers the discovery).  
 Override `nodeId` at runtime via `msg.nodeId`.
@@ -114,7 +119,8 @@ Override `nodeId` at runtime via `msg.nodeId`.
           "clusterIdHex": "0028",
           "clusterName": "BasicInformation",
           "attributes": ["vendorName", "productName", "serialNumber", ...],
-          "commands": []
+          "commands": [],
+          "events": []
         }
       ]
     },
@@ -122,18 +128,12 @@ Override `nodeId` at runtime via `msg.nodeId`.
       "endpointId": 1,
       "clusters": [
         {
-          "clusterId": 47,
-          "clusterIdHex": "002F",
-          "clusterName": "PowerSource",
-          "attributes": ["batPercentRemaining", "batVoltage", "batChargeLevel", ...],
-          "commands": []
-        },
-        {
           "clusterId": 257,
           "clusterIdHex": "0101",
           "clusterName": "DoorLock",
           "attributes": ["lockState", "lockType", "doorState", ...],
-          "commands": ["lockDoor", "unlockDoor", "unlockWithTimeout", ...]
+          "commands": ["lockDoor", "unlockDoor", "unlockWithTimeout", ...],
+          "events": ["doorLockAlarm", "lockOperation", ...]
         }
       ]
     }
@@ -141,24 +141,25 @@ Override `nodeId` at runtime via `msg.nodeId`.
 }
 ```
 
-Connect the output to a Debug node set to **"complete msg object"** to inspect the full structure.  
-Use the `clusterIdHex` and attribute/command names directly in the other nodes.
+Connect the output to a Debug node set to **"complete msg object"** to inspect the full structure.
 
+> **Tip:** If the device dropdown in another node shows *"select a controller first"* or is empty after commissioning, run this node with the device's `nodeId`, then re-open the edit dialog.
 
+---
+
+### `matter-command`
 
 Send a command to a cluster on a commissioned device.
 
-**Config / `msg` overrides:**
+The edit dialog shows **cascading dropdowns** (Device → Endpoint → Cluster → Command) populated from the device registry. The selected values fill the underlying text fields; all fields can also be overridden at runtime via `msg`:
 
 | Field | Description | Example |
 |---|---|---|
-| `nodeId` | Commissioned node ID | `1` |
+| `nodeId` | Commissioned node ID | `7825526669137635300` |
 | `endpointId` | Endpoint number | `1` |
 | `clusterId` | Cluster ID (hex) | `0101` (DoorLock) |
 | `commandName` | Command name (camelCase) | `lockDoor`, `unlockDoor` |
 | `payload` | Command arguments object | `{ "timeout": 30 }` |
-
-All fields can be overridden at runtime via `msg.nodeId`, `msg.endpointId`, `msg.clusterId`, `msg.commandName`, `msg.payload`.
 
 ---
 
@@ -166,9 +167,11 @@ All fields can be overridden at runtime via `msg.nodeId`, `msg.endpointId`, `msg
 
 Read an attribute value from a commissioned device on any input message.
 
+The edit dialog shows **cascading dropdowns** (Device → Endpoint → Cluster → Attribute).
+
 | Field | Description | Example |
 |---|---|---|
-| `nodeId` | Commissioned node ID | `1` |
+| `nodeId` | Commissioned node ID | `7825526669137635300` |
 | `endpointId` | Endpoint number | `1` |
 | `clusterId` | Cluster ID (hex) | `0101` |
 | `attributeName` | Attribute name (camelCase) | `lockState` |
@@ -181,21 +184,21 @@ Read an attribute value from a commissioned device on any input message.
 
 Subscribes to real-time attribute changes and/or events from a device. Starts automatically on deploy, no input needed.
 
+The edit dialog shows **cascading dropdowns** (Device → Endpoint → Cluster → Attribute / Event). All filter fields are optional — leave blank to receive everything from the device.
+
 | Field | Description | Example |
 |---|---|---|
-| `nodeId` | Commissioned node ID | `1` |
+| `nodeId` | Commissioned node ID (required) | `7825526669137635300` |
 | `endpointId` | *(optional)* Filter by endpoint | `1` |
 | `clusterId` | *(optional)* Filter by cluster (hex) | `0101` |
 | `attributeName` | *(optional)* Filter by attribute | `lockState` |
 | `eventName` | *(optional)* Filter by event | `doorLockAlarm` |
 
-Leave filter fields blank to receive all changes from the node.
-
 **Output `msg.payload` — attribute change:**
 ```json
 {
   "type": "attribute",
-  "nodeId": "1",
+  "nodeId": "7825526669137635300",
   "endpointId": 1,
   "clusterId": 257,
   "attributeName": "lockState",
@@ -208,7 +211,7 @@ Leave filter fields blank to receive all changes from the node.
 ```json
 {
   "type": "event",
-  "nodeId": "1",
+  "nodeId": "7825526669137635300",
   "endpointId": 1,
   "clusterId": 257,
   "eventName": "doorLockAlarm",
@@ -219,14 +222,53 @@ Leave filter fields blank to receive all changes from the node.
 
 ---
 
+### `matter-decommission`
+
+Decommission (unpair) a Matter device from the controller fabric and remove it from the device registry.
+
+The edit dialog shows a **Device dropdown** populated from the registry and a **Force** checkbox.
+
+**Input `msg.payload`:**
+
+| Field | Type | Description |
+|---|---|---|
+| `nodeId` | string | Decimal node ID of the device to remove. Overrides node config. |
+| `force` | boolean | When `true`, skips the fabric-level RemoveFabric command and only erases local storage. Use when the device is offline or already factory-reset. Default: `false`. |
+
+**Output `msg.payload`:**
+```json
+{ "ok": true, "nodeId": "7825526669137635300", "force": false }
+```
+
+| Mode | Behaviour |
+|---|---|
+| Normal (force = false) | Sends *RemoveFabric* to the device, then erases local storage and registry entry |
+| Force (force = true) | Erases local storage and registry entry only — device must be manually factory-reset |
+
+---
+
+## Device Registry
+
+The device registry is a JSON file persisted at `<storagePath>/node-red-matter/registry.json` (default: `~/.node-red-matter/node-red-matter/registry.json`).
+
+It is populated automatically:
+- **On commission** — `matter-commission` triggers a background discovery immediately after pairing
+- **On discover** — `matter-discover` always writes the latest structure to the registry
+- **On decommission** — `matter-decommission` removes the entry
+
+If a device does not appear in the dropdowns (e.g. the background discovery after commissioning failed for a sleepy Thread/ICD device), run `matter-discover` with the `nodeId` and then re-open the edit dialog.
+
+---
+
 ## Example: Nuki Smart Lock
 
 Import `examples/nuki-lock.json` into Node-RED for a ready-made flow covering:
 
 1. Commission the lock (one-time)
-2. Lock / Unlock / Unlock with timeout
-3. Read `lockState` on demand
-4. Subscribe to `lockState` changes and `doorLockAlarm` events
+2. Discover and register in the device registry
+3. Lock / Unlock / Unlock with timeout
+4. Read `lockState` on demand
+5. Subscribe to `lockState` changes and `doorLockAlarm` events
 
 **DoorLock cluster reference:**
 
@@ -292,3 +334,4 @@ ln -s /path/to/node-red-contrib-matter node-red-contrib-matter
 ## License
 
 Apache 2.0
+

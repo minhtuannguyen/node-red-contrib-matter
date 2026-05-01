@@ -20,7 +20,11 @@ module.exports = function (RED) {
             }
             this.status({ fill: "yellow", shape: "dot", text: `discovering node ${nodeId}…` });
             try {
-                const description = await controllerNode.manager.discoverDevice(nodeId);
+                // registerDevice discovers the device AND saves it to the registry so
+                // the cascading dropdowns in command/read/subscribe nodes can find it.
+                await controllerNode.manager.registerDevice(nodeId);
+                const description = controllerNode.manager.getRegistry()[nodeId]?.discovery
+                    ?? await controllerNode.manager.discoverDevice(nodeId);
                 const endpointCount = description.endpoints.length;
                 const clusterCount = description.endpoints.reduce((s, e) => s + e.clusters.length, 0);
                 this.status({
