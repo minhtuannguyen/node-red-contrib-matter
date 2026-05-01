@@ -118,7 +118,6 @@ export declare class ControllerManager {
     private requireController;
     private ensureSubscribed;
     private activateSubscriptions;
-    private attachObservables;
     private buildNodeInfo;
     private getOrCreateHandlerSet;
 }

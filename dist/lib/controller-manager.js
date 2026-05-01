@@ -372,56 +372,51 @@ class ControllerManager {
         }
     }
     async activateSubscriptions(nodeIdStr, node) {
-        this.attachObservables(nodeIdStr, node);
-        // Explicitly subscribe — required for sleepy/ICD devices (e.g. Thread locks).
-        // autoSubscribe:false + explicit call works for both always-on and sleepy devices.
-        // ignoreInitialTriggers:false ensures we get the current state on subscribe.
-        await node.subscribeAllAttributesAndEvents({ ignoreInitialTriggers: false });
+        // Pass callbacks directly — node.events.attributeChanged/eventTriggered are only
+        // emitted by the internal autoSubscribe path, NOT when calling subscribeAllAttributesAndEvents
+        // explicitly. Passing callbacks here is the correct way to receive updates.
+        await node.subscribeAllAttributesAndEvents({
+            ignoreInitialTriggers: false,
+            attributeChangedCallback: (data) => {
+                const handlers = this.attrHandlers.get(nodeIdStr);
+                if (!handlers?.size)
+                    return;
+                const event = {
+                    nodeId: nodeIdStr,
+                    endpointId: data.path.endpointId,
+                    clusterId: data.path.clusterId,
+                    attributeName: data.path.attributeName,
+                    value: data.value,
+                    timestamp: new Date(),
+                };
+                for (const h of handlers) {
+                    try {
+                        h(event);
+                    }
+                    catch { /* keep other handlers running */ }
+                }
+            },
+            eventTriggeredCallback: (data) => {
+                const handlers = this.eventHandlers.get(nodeIdStr);
+                if (!handlers?.size)
+                    return;
+                const event = {
+                    nodeId: nodeIdStr,
+                    endpointId: data.path.endpointId,
+                    clusterId: data.path.clusterId,
+                    eventName: data.path.eventName,
+                    events: data.events,
+                    timestamp: new Date(),
+                };
+                for (const h of handlers) {
+                    try {
+                        h(event);
+                    }
+                    catch { /* keep other handlers running */ }
+                }
+            },
+        });
         logger.info(`Subscribed to all attributes and events for node ${nodeIdStr}`);
-    }
-    attachObservables(nodeIdStr, node) {
-        const attrObs = (data) => {
-            const handlers = this.attrHandlers.get(nodeIdStr);
-            if (!handlers?.size)
-                return;
-            const event = {
-                nodeId: nodeIdStr,
-                endpointId: data.path.endpointId,
-                clusterId: data.path.clusterId,
-                attributeName: data.path.attributeName,
-                value: data.value,
-                timestamp: new Date(),
-            };
-            for (const h of handlers) {
-                try {
-                    h(event);
-                }
-                catch { /* keep other handlers running */ }
-            }
-        };
-        const evtObs = (data) => {
-            const handlers = this.eventHandlers.get(nodeIdStr);
-            if (!handlers?.size)
-                return;
-            const event = {
-                nodeId: nodeIdStr,
-                endpointId: data.path.endpointId,
-                clusterId: data.path.clusterId,
-                eventName: data.path.eventName,
-                events: data.events,
-                timestamp: new Date(),
-            };
-            for (const h of handlers) {
-                try {
-                    h(event);
-                }
-                catch { /* keep other handlers running */ }
-            }
-        };
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        node.events.attributeChanged.on(attrObs);
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        node.events.eventTriggered.on(evtObs);
     }
     buildNodeInfo(node) {
         const devices = node.getDevices();
