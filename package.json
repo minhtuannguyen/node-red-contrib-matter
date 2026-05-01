@@ -1,0 +1,48 @@
+{
+  "name": "node-red-contrib-matter",
+  "version": "0.1.0",
+  "description": "Generic Matter protocol controller for Node-RED — commission and control any Matter device (locks, lights, sensors) over IP/Thread",
+  "keywords": [
+    "node-red",
+    "matter",
+    "smart-home",
+    "iot",
+    "thread",
+    "nuki",
+    "home-automation"
+  ],
+  "author": "",
+  "license": "Apache-2.0",
+  "main": "dist/index.js",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "copy-html": "find src -name '*.html' | while read f; do dest=\"dist/${f#src/}\"; mkdir -p \"$(dirname \"$dest\")\"; cp \"$f\" \"$dest\"; done",
+    "build": "tsc && npm run copy-html",
+    "dev": "tsc --watch",
+    "prepublishOnly": "npm run build",
+    "clean": "rm -rf dist"
+  },
+  "node-red": {
+    "version": ">=3.0.0",
+    "nodes": {
+      "matter-controller": "dist/nodes/matter-controller/matter-controller.js",
+      "matter-commission": "dist/nodes/matter-commission/matter-commission.js",
+      "matter-discover":   "dist/nodes/matter-discover/matter-discover.js",
+      "matter-command":    "dist/nodes/matter-command/matter-command.js",
+      "matter-read":       "dist/nodes/matter-read/matter-read.js",
+      "matter-subscribe":  "dist/nodes/matter-subscribe/matter-subscribe.js"
+    }
+  },
+  "dependencies": {
+    "@matter/general": "^0.16.11",
+    "@matter/nodejs": "^0.16.11",
+    "@matter/types": "^0.16.11",
+    "@project-chip/matter.js": "^0.16.11",
+    "typescript": "^5.4.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0"
+  }
+}

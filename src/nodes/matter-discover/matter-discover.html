@@ -1,0 +1,95 @@
+<script type="text/javascript">
+  RED.nodes.registerType('matter-discover', {
+    category:    'matter',
+    color:       '#7CBBDE',
+    defaults: {
+      name:       { value: '' },
+      controller: { value: '', type: 'matter-controller', required: true },
+      nodeId:     { value: '' }
+    },
+    inputs:  1,
+    outputs: 1,
+    icon:    'font-awesome/fa-search',
+    label: function () {
+      return this.name || (this.nodeId ? `discover: node ${this.nodeId}` : 'Matter Discover');
+    },
+    paletteLabel: 'discover'
+  });
+</script>
+
+<script type="text/html" data-template-name="matter-discover">
+  <div class="form-row">
+    <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+    <input type="text" id="node-input-name" placeholder="Matter Discover">
+  </div>
+  <div class="form-row">
+    <label for="node-input-controller"><i class="fa fa-cog"></i> Controller</label>
+    <input type="text" id="node-input-controller">
+  </div>
+  <div class="form-row">
+    <label for="node-input-nodeId"><i class="fa fa-microchip"></i> Node ID</label>
+    <input type="text" id="node-input-nodeId" placeholder="e.g. 1 (decimal) — or set via msg.nodeId">
+    <div class="form-tips">
+      Commissioned node ID (decimal). Leave blank to use <code>msg.nodeId</code> at runtime.
+    </div>
+  </div>
+</script>
+
+<script type="text/html" data-help-name="matter-discover">
+  <p>Discovers all endpoints, clusters, attributes, and commands of a commissioned Matter device.</p>
+  <p>Trigger with any input message. The node connects to the device, reads the cluster structure,
+  and outputs a full description of what the device supports.</p>
+
+  <h3>Input</h3>
+  <dl class="message-properties">
+    <dt class="optional">nodeId <span class="property-type">string</span></dt>
+    <dd>Override the configured node ID at runtime.</dd>
+  </dl>
+
+  <h3>Output</h3>
+  <dl class="message-properties">
+    <dt>payload <span class="property-type">object</span></dt>
+    <dd>
+      Device description:
+      <pre>{
+  "nodeId": "1",
+  "endpoints": [
+    {
+      "endpointId": 0,
+      "clusters": [
+        {
+          "clusterId": 40,
+          "clusterIdHex": "0028",
+          "clusterName": "BasicInformation",
+          "attributes": ["vendorName", "productName", ...],
+          "commands": []
+        }
+      ]
+    },
+    {
+      "endpointId": 1,
+      "clusters": [
+        {
+          "clusterId": 257,
+          "clusterIdHex": "0101",
+          "clusterName": "DoorLock",
+          "attributes": ["lockState", "lockType", ...],
+          "commands": ["lockDoor", "unlockDoor", ...]
+        }
+      ]
+    }
+  ]
+}</pre>
+    </dd>
+    <dt>topic <span class="property-type">string</span></dt>
+    <dd><code>discover:&lt;nodeId&gt;</code></dd>
+  </dl>
+
+  <h3>Details</h3>
+  <p>
+    Use this node once after commissioning to learn the device's cluster IDs, attribute names,
+    and command names — then use those values in the <b>matter-command</b>,
+    <b>matter-read</b>, and <b>matter-subscribe</b> nodes.
+  </p>
+  <p>Connect the output to a Debug node set to "complete msg object" to see the full structure.</p>
+</script>

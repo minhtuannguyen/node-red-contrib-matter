@@ -1,0 +1,96 @@
+<script type="text/javascript">
+  RED.nodes.registerType('matter-subscribe', {
+    category:    'matter',
+    color:       '#7CBBDE',
+    defaults: {
+      name:          { value: '' },
+      controller:    { value: '', type: 'matter-controller', required: true },
+      nodeId:        { value: '', required: true },
+      endpointId:    { value: '' },
+      clusterId:     { value: '' },
+      attributeName: { value: '' },
+      eventName:     { value: '' }
+    },
+    inputs:  0,
+    outputs: 1,
+    icon:    'font-awesome/fa-bell',
+    label: function () {
+      if (this.name) return this.name;
+      const filters = [this.attributeName, this.eventName].filter(Boolean).join(', ');
+      return filters ? `subscribe: ${filters}` : `subscribe: node ${this.nodeId || '?'}`;
+    },
+    paletteLabel: 'subscribe'
+  });
+</script>
+
+<script type="text/html" data-template-name="matter-subscribe">
+  <div class="form-row">
+    <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+    <input type="text" id="node-input-name" placeholder="Matter Subscribe">
+  </div>
+  <div class="form-row">
+    <label for="node-input-controller"><i class="fa fa-cog"></i> Controller</label>
+    <input type="text" id="node-input-controller">
+  </div>
+  <div class="form-row">
+    <label for="node-input-nodeId"><i class="fa fa-microchip"></i> Node ID</label>
+    <input type="text" id="node-input-nodeId" placeholder="e.g. 1 (decimal)" required>
+  </div>
+
+  <div class="form-tips" style="margin-bottom: 10px;">
+    All filters below are <strong>optional</strong> — leave blank to receive all
+    changes for the given node.
+  </div>
+
+  <div class="form-row">
+    <label for="node-input-endpointId"><i class="fa fa-sitemap"></i> Endpoint Filter</label>
+    <input type="text" id="node-input-endpointId" placeholder="(all endpoints)">
+  </div>
+  <div class="form-row">
+    <label for="node-input-clusterId"><i class="fa fa-cubes"></i> Cluster Filter (hex)</label>
+    <input type="text" id="node-input-clusterId" placeholder="e.g. 0101 (all clusters)">
+  </div>
+  <div class="form-row">
+    <label for="node-input-attributeName"><i class="fa fa-database"></i> Attribute Filter</label>
+    <input type="text" id="node-input-attributeName" placeholder="e.g. lockState (all attributes)">
+  </div>
+  <div class="form-row">
+    <label for="node-input-eventName"><i class="fa fa-bell"></i> Event Filter</label>
+    <input type="text" id="node-input-eventName" placeholder="e.g. doorLockAlarm (all events)">
+  </div>
+</script>
+
+<script type="text/html" data-help-name="matter-subscribe">
+  <p>
+    Subscribe to attribute changes and events from a commissioned Matter device.
+    Emits a message whenever a matching change is received.
+  </p>
+  <h3>Output</h3>
+  <dl class="message-properties">
+    <dt>payload.type <span class="property-type">string</span></dt>
+    <dd><code>"attribute"</code> or <code>"event"</code></dd>
+    <dt>payload.nodeId <span class="property-type">string</span></dt>
+    <dd>Matter Node ID (decimal string)</dd>
+    <dt>payload.endpointId <span class="property-type">number</span></dt>
+    <dt>payload.clusterId <span class="property-type">number</span></dt>
+    <dt>payload.attributeName / payload.eventName <span class="property-type">string</span></dt>
+    <dt>payload.value <span class="property-type">any</span></dt>
+    <dd>Decoded attribute value (for attribute changes)</dd>
+    <dt>payload.events <span class="property-type">array</span></dt>
+    <dd>Decoded event data array (for events)</dd>
+    <dt>payload.timestamp <span class="property-type">string</span></dt>
+    <dd>ISO-8601 timestamp of when the change was received</dd>
+    <dt>topic <span class="property-type">string</span></dt>
+    <dd>Attribute or event name</dd>
+  </dl>
+  <h3>Details</h3>
+  <p>
+    On deploy, this node connects to the specified Matter device and establishes
+    a subscription. The Matter device will push changes in real time.
+    No polling occurs.
+  </p>
+  <p>
+    Multiple subscribe nodes can watch the same device — subscriptions are
+    shared efficiently within the controller fabric.
+  </p>
+</script>

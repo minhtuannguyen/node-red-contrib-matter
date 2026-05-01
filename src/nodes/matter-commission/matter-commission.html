@@ -1,0 +1,62 @@
+<script type="text/javascript">
+  RED.nodes.registerType('matter-commission', {
+    category:    'matter',
+    color:       '#7CBBDE',
+    defaults: {
+      name:        { value: '' },
+      controller:  { value: '', type: 'matter-controller', required: true },
+      pairingCode: { value: '' }
+    },
+    inputs:  1,
+    outputs: 1,
+    icon:    'font-awesome/fa-link',
+    label: function () {
+      return this.name || 'Commission Device';
+    },
+    paletteLabel: 'commission'
+  });
+</script>
+
+<script type="text/html" data-template-name="matter-commission">
+  <div class="form-row">
+    <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+    <input type="text" id="node-input-name" placeholder="Commission Device">
+  </div>
+  <div class="form-row">
+    <label for="node-input-controller">
+      <i class="fa fa-cog"></i> Controller
+    </label>
+    <input type="text" id="node-input-controller">
+  </div>
+  <div class="form-row">
+    <label for="node-input-pairingCode">
+      <i class="fa fa-key"></i> Pairing Code
+    </label>
+    <input type="text" id="node-input-pairingCode" placeholder="12345678901 (or use msg.payload.pairingCode)">
+    <div class="form-tips">
+      11-digit manual pairing code from the device (dashes optional, e.g. <code>1234-567-8901</code>).
+      Open a commissioning window in Apple Home first (multi-admin). Leave blank to
+      use <code>msg.payload.pairingCode</code> at runtime.
+    </div>
+  </div>
+</script>
+
+<script type="text/html" data-help-name="matter-commission">
+  <p>Commission a Matter device into the Node-RED controller fabric.</p>
+  <h3>Input</h3>
+  <dl class="message-properties">
+    <dt>payload.pairingCode <span class="property-type">string</span></dt>
+    <dd>11-digit manual pairing code. Overrides the code set in the node config.</dd>
+  </dl>
+  <h3>Output</h3>
+  <dl class="message-properties">
+    <dt>payload <span class="property-type">object</span></dt>
+    <dd><code>{ nodeId, endpoints }</code> — the newly-commissioned node's info.</dd>
+  </dl>
+  <h3>Details</h3>
+  <p>
+    Before using this node, open a commissioning window on the device from your
+    primary Matter controller (e.g. Apple Home → Share Access). Copy the pairing
+    code and inject it via this node or configure it statically.
+  </p>
+</script>

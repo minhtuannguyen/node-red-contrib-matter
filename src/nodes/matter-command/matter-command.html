@@ -1,0 +1,87 @@
+<script type="text/javascript">
+  RED.nodes.registerType('matter-command', {
+    category:    'matter',
+    color:       '#7CBBDE',
+    defaults: {
+      name:        { value: '' },
+      controller:  { value: '', type: 'matter-controller', required: true },
+      nodeId:      { value: '' },
+      endpointId:  { value: '1', validate: RED.validators.number() },
+      clusterId:   { value: '0101' },
+      commandName: { value: '' }
+    },
+    inputs:  1,
+    outputs: 1,
+    icon:    'font-awesome/fa-bolt',
+    label: function () {
+      return this.name || (this.commandName ? `cmd: ${this.commandName}` : 'Matter Command');
+    },
+    paletteLabel: 'command'
+  });
+</script>
+
+<script type="text/html" data-template-name="matter-command">
+  <div class="form-row">
+    <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+    <input type="text" id="node-input-name" placeholder="Matter Command">
+  </div>
+  <div class="form-row">
+    <label for="node-input-controller"><i class="fa fa-cog"></i> Controller</label>
+    <input type="text" id="node-input-controller">
+  </div>
+  <div class="form-row">
+    <label for="node-input-nodeId"><i class="fa fa-microchip"></i> Node ID</label>
+    <input type="text" id="node-input-nodeId" placeholder="e.g. 1 (decimal)">
+    <div class="form-tips">
+      Decimal Node ID assigned during commissioning. Override at runtime via
+      <code>msg.nodeId</code>.
+    </div>
+  </div>
+  <div class="form-row">
+    <label for="node-input-endpointId"><i class="fa fa-sitemap"></i> Endpoint</label>
+    <input type="number" id="node-input-endpointId" placeholder="1" min="0">
+  </div>
+  <div class="form-row">
+    <label for="node-input-clusterId"><i class="fa fa-cubes"></i> Cluster ID (hex)</label>
+    <input type="text" id="node-input-clusterId" placeholder="0101 (DoorLock)">
+    <div class="form-tips">
+      Hex cluster ID without <code>0x</code> prefix. Common: <code>0101</code> DoorLock,
+      <code>0006</code> OnOff, <code>0008</code> LevelControl.
+      Override via <code>msg.clusterId</code>.
+    </div>
+  </div>
+  <div class="form-row">
+    <label for="node-input-commandName"><i class="fa fa-play"></i> Command</label>
+    <input type="text" id="node-input-commandName" placeholder="e.g. lockDoor">
+    <div class="form-tips">
+      Camel-case command name as defined in the Matter spec.
+      DoorLock examples: <code>lockDoor</code>, <code>unlockDoor</code>,
+      <code>unlockWithTimeout</code>.
+      Override via <code>msg.commandName</code>.
+    </div>
+  </div>
+</script>
+
+<script type="text/html" data-help-name="matter-command">
+  <p>Send a cluster command to a commissioned Matter device.</p>
+  <h3>Input</h3>
+  <dl class="message-properties">
+    <dt>payload <span class="property-type">object</span></dt>
+    <dd>Command arguments (e.g. <code>{}</code> for LockDoor). Use an empty object or omit for commands with no parameters.</dd>
+    <dt class="optional">nodeId <span class="property-type">string</span></dt>
+    <dd>Decimal Node ID — overrides the value set in the node config.</dd>
+    <dt class="optional">endpointId <span class="property-type">number</span></dt>
+    <dd>Endpoint number — overrides config.</dd>
+    <dt class="optional">clusterId <span class="property-type">string</span></dt>
+    <dd>Hex cluster ID — overrides config.</dd>
+    <dt class="optional">commandName <span class="property-type">string</span></dt>
+    <dd>Camel-case command name — overrides config.</dd>
+  </dl>
+  <h3>Output</h3>
+  <dl class="message-properties">
+    <dt>payload <span class="property-type">any</span></dt>
+    <dd>Command response (or <code>null</code> for void commands).</dd>
+    <dt>topic <span class="property-type">string</span></dt>
+    <dd>The command name that was invoked.</dd>
+  </dl>
+</script>
