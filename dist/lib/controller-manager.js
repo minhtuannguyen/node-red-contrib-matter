@@ -246,18 +246,22 @@ class ControllerManager {
         }
         const ctrl = this.requireController();
         const nodeId = (0, types_1.NodeId)(BigInt(nodeIdStr));
+        // Always connect without autoSubscribe — we manage subscriptions explicitly
+        // via subscribeAllAttributesAndEvents() so it works correctly for both
+        // always-on and sleepy/ICD (Thread) devices.
         const connectOptions = {
-            autoSubscribe: withSubscription,
+            autoSubscribe: false,
         };
         const node = await ctrl.connectNode(nodeId, connectOptions);
         // Wait for local initialization (uses previously cached data if available).
         if (!node.initialized) {
             await node.events.initialized;
         }
+        this.connectedNodes.set(nodeIdStr, { node, subscribed: false });
         if (withSubscription) {
-            this.attachObservables(nodeIdStr, node);
+            await this.activateSubscriptions(nodeIdStr, node);
+            this.connectedNodes.get(nodeIdStr).subscribed = true;
         }
-        this.connectedNodes.set(nodeIdStr, { node, subscribed: withSubscription });
         return node;
     }
     // ----------- Cluster operations ----------------------------------------
@@ -369,7 +373,10 @@ class ControllerManager {
     }
     async activateSubscriptions(nodeIdStr, node) {
         this.attachObservables(nodeIdStr, node);
-        await node.subscribeAllAttributesAndEvents();
+        // Explicitly subscribe — required for sleepy/ICD devices (e.g. Thread locks).
+        // autoSubscribe:false + explicit call works for both always-on and sleepy devices.
+        // ignoreInitialTriggers:false ensures we get the current state on subscribe.
+        await node.subscribeAllAttributesAndEvents({ ignoreInitialTriggers: false });
         logger.info(`Subscribed to all attributes and events for node ${nodeIdStr}`);
     }
     attachObservables(nodeIdStr, node) {
