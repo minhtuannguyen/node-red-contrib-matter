@@ -78,6 +78,12 @@ export declare class ControllerManager {
      * each sending their own Subscribe Request to the device.
      */
     private readonly subscribingPromises;
+    /**
+     * Per-node stateChanged listeners that re-subscribe after the device
+     * reconnects following an outage. Kept here so they can be cleanly
+     * detached in close() and removeDevice().
+     */
+    private readonly stateHandlers;
     /** Persisted registry of commissioned devices with their discovery data */
     private registry;
     private registryPath;

@@ -40,9 +40,19 @@ jest.mock("@matter/types", () => ({
 // PairedNode mock factory
 // ---------------------------------------------------------------------------
 
+interface MockStateChangedObservable {
+  on:    jest.Mock;
+  off:   jest.Mock;
+  /** Synchronously invoke all currently-registered listeners. */
+  _emit: (state: number) => void;
+}
+
 interface MockPairedNode {
   initialized: boolean;
-  events: Record<string, unknown>;
+  events: {
+    initialized: unknown;
+    stateChanged: MockStateChangedObservable;
+  };
   nodeId: bigint;
   subscribeAllAttributesAndEvents: jest.Mock;
   getRootEndpoint: jest.Mock;
@@ -51,9 +61,15 @@ interface MockPairedNode {
 }
 
 function makePairedNode(overrides: Partial<MockPairedNode> = {}): MockPairedNode {
+  const listeners = new Set<(state: number) => void>();
+  const stateChanged: MockStateChangedObservable = {
+    on:    jest.fn((h: (s: number) => void) => listeners.add(h)),
+    off:   jest.fn((h: (s: number) => void) => listeners.delete(h)),
+    _emit: (state: number) => { for (const h of listeners) h(state); },
+  };
   return {
     initialized: true,
-    events: { initialized: Promise.resolve() },
+    events: { initialized: Promise.resolve(), stateChanged },
     nodeId: BigInt(12345),
     subscribeAllAttributesAndEvents: jest.fn().mockResolvedValue(undefined),
     getRootEndpoint: jest.fn().mockReturnValue({
@@ -86,7 +102,10 @@ jest.mock("@project-chip/matter.js", () => ({
   })),
 }));
 
-jest.mock("@project-chip/matter.js/device", () => ({}));
+jest.mock("@project-chip/matter.js/device", () => ({
+  // Must match NodeStates enum values from the real module
+  NodeStates: { Connected: 0, Disconnected: 1, Reconnecting: 2 },
+}));
 
 // ---------------------------------------------------------------------------
 // Filesystem mocks
@@ -512,3 +531,154 @@ describe("listCommissionedNodes()", () => {
     expect(nodes).toEqual(["1", "2"]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Re-subscription after device reconnect (bug fix)
+// ---------------------------------------------------------------------------
+
+// NodeStates values as mocked by jest.mock("@project-chip/matter.js/device")
+const NS = { Connected: 0, Disconnected: 1, Reconnecting: 2 };
+
+describe("Re-subscription after device reconnect", () => {
+  function makeReconnectableNode() {
+    const pairedNode = makePairedNode();
+    let capturedAttrCb: ((data: unknown) => void) | undefined;
+    pairedNode.subscribeAllAttributesAndEvents = jest.fn().mockImplementation(
+      (opts: { attributeChangedCallback: (d: unknown) => void }) => {
+        capturedAttrCb = opts.attributeChangedCallback;
+        return Promise.resolve();
+      },
+    );
+    return { pairedNode, getAttrCb: () => capturedAttrCb };
+  }
+
+  it("re-calls subscribeAllAttributesAndEvents after Disconnected → Connected", async () => {
+    const m = ControllerManager.getInstance(STORAGE_A, 5540);
+    await m.start();
+
+    const { pairedNode } = makeReconnectableNode();
+    mockConnectNode = jest.fn().mockResolvedValue(pairedNode);
+
+    await m.addAttributeHandler("12345", jest.fn());
+    expect(pairedNode.subscribeAllAttributesAndEvents).toHaveBeenCalledTimes(1);
+
+    // Device goes offline
+    pairedNode.events.stateChanged._emit(NS.Disconnected);
+    // Device comes back
+    pairedNode.events.stateChanged._emit(NS.Connected);
+    await new Promise((r) => setImmediate(r));
+
+    expect(pairedNode.subscribeAllAttributesAndEvents).toHaveBeenCalledTimes(2);
+  });
+
+  it("attribute events flow again after re-subscription", async () => {
+    const m = ControllerManager.getInstance(STORAGE_A, 5540);
+    await m.start();
+
+    const { pairedNode, getAttrCb } = makeReconnectableNode();
+    mockConnectNode = jest.fn().mockResolvedValue(pairedNode);
+
+    const handler = jest.fn();
+    await m.addAttributeHandler("12345", handler);
+
+    // Fire event before disconnect — should be received
+    getAttrCb()!({ path: { endpointId: 1, clusterId: 6, attributeName: "onOff" }, value: true });
+    expect(handler).toHaveBeenCalledTimes(1);
+
+    // Simulate outage and reconnect
+    pairedNode.events.stateChanged._emit(NS.Disconnected);
+    pairedNode.events.stateChanged._emit(NS.Connected);
+    await new Promise((r) => setImmediate(r));
+
+    // Fire event after reconnect — new callback captured by second subscribe call
+    getAttrCb()!({ path: { endpointId: 1, clusterId: 6, attributeName: "onOff" }, value: false });
+    expect(handler).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not re-subscribe if no handlers remain after disconnect", async () => {
+    const m = ControllerManager.getInstance(STORAGE_A, 5540);
+    await m.start();
+
+    const { pairedNode } = makeReconnectableNode();
+    mockConnectNode = jest.fn().mockResolvedValue(pairedNode);
+
+    const handler = jest.fn();
+    await m.addAttributeHandler("12345", handler);
+    // Remove the only handler
+    m.removeAttributeHandler("12345", handler);
+
+    pairedNode.events.stateChanged._emit(NS.Disconnected);
+    pairedNode.events.stateChanged._emit(NS.Connected);
+    await new Promise((r) => setImmediate(r));
+
+    // Still only 1 subscription (the initial one)
+    expect(pairedNode.subscribeAllAttributesAndEvents).toHaveBeenCalledTimes(1);
+  });
+
+  it("Connected without prior Disconnected does not trigger re-subscription", async () => {
+    const m = ControllerManager.getInstance(STORAGE_A, 5540);
+    await m.start();
+
+    const { pairedNode } = makeReconnectableNode();
+    mockConnectNode = jest.fn().mockResolvedValue(pairedNode);
+
+    await m.addAttributeHandler("12345", jest.fn());
+    expect(pairedNode.subscribeAllAttributesAndEvents).toHaveBeenCalledTimes(1);
+
+    // Fire Connected without a prior Disconnected — wasDisconnected=false guard
+    pairedNode.events.stateChanged._emit(NS.Connected);
+    await new Promise((r) => setImmediate(r));
+
+    // Must still be exactly 1
+    expect(pairedNode.subscribeAllAttributesAndEvents).toHaveBeenCalledTimes(1);
+  });
+
+  it("registers only one stateChanged listener per node even after multiple reconnects", async () => {
+    const m = ControllerManager.getInstance(STORAGE_A, 5540);
+    await m.start();
+
+    const { pairedNode } = makeReconnectableNode();
+    mockConnectNode = jest.fn().mockResolvedValue(pairedNode);
+
+    await m.addAttributeHandler("12345", jest.fn());
+    const { on, off } = pairedNode.events.stateChanged;
+
+    // First subscription: one .on() call
+    expect((on as jest.Mock).mock.calls.length).toBe(1);
+
+    // First reconnect
+    pairedNode.events.stateChanged._emit(NS.Disconnected);
+    pairedNode.events.stateChanged._emit(NS.Connected);
+    await new Promise((r) => setImmediate(r));
+
+    // The old listener was removed (.off called once) and a new one added
+    expect((off as jest.Mock).mock.calls.length).toBe(1);
+    expect((on as jest.Mock).mock.calls.length).toBe(2);
+
+    // Second reconnect
+    pairedNode.events.stateChanged._emit(NS.Disconnected);
+    pairedNode.events.stateChanged._emit(NS.Connected);
+    await new Promise((r) => setImmediate(r));
+
+    expect((off as jest.Mock).mock.calls.length).toBe(2);
+    expect((on as jest.Mock).mock.calls.length).toBe(3);
+  });
+
+  it("Reconnecting state also marks subscribed=false", async () => {
+    const m = ControllerManager.getInstance(STORAGE_A, 5540);
+    await m.start();
+
+    const { pairedNode } = makeReconnectableNode();
+    mockConnectNode = jest.fn().mockResolvedValue(pairedNode);
+
+    await m.addAttributeHandler("12345", jest.fn());
+
+    // Reconnecting (not full disconnect) should still trigger re-subscribe on reconnect
+    pairedNode.events.stateChanged._emit(NS.Reconnecting);
+    pairedNode.events.stateChanged._emit(NS.Connected);
+    await new Promise((r) => setImmediate(r));
+
+    expect(pairedNode.subscribeAllAttributesAndEvents).toHaveBeenCalledTimes(2);
+  });
+});
+

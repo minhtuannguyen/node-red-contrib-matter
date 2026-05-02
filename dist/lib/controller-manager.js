@@ -14,6 +14,7 @@ const node_fs_1 = require("node:fs");
 const promises_1 = require("node:fs/promises");
 const node_path_1 = require("node:path");
 const matter_js_1 = require("@project-chip/matter.js");
+const device_1 = require("@project-chip/matter.js/device");
 const general_1 = require("@matter/general");
 const types_1 = require("@matter/types");
 const logger = general_1.Logger.get("ControllerManager");
@@ -124,6 +125,12 @@ class ControllerManager {
      * each sending their own Subscribe Request to the device.
      */
     subscribingPromises = new Map();
+    /**
+     * Per-node stateChanged listeners that re-subscribe after the device
+     * reconnects following an outage. Kept here so they can be cleanly
+     * detached in close() and removeDevice().
+     */
+    stateHandlers = new Map();
     /** Persisted registry of commissioned devices with their discovery data */
     registry = {};
     registryPath = "";
@@ -186,6 +193,14 @@ class ControllerManager {
     async close() {
         if (!this.started)
             return;
+        // Detach stateChanged listeners before clearing the node map so we still
+        // have access to entry.node for the .off() call.
+        for (const [nodeIdStr, entry] of this.connectedNodes) {
+            const h = this.stateHandlers.get(nodeIdStr);
+            if (h)
+                entry.node.events.stateChanged.off(h);
+        }
+        this.stateHandlers.clear();
         this.connectedNodes.clear();
         this.attrHandlers.clear();
         this.eventHandlers.clear();
@@ -456,6 +471,53 @@ class ControllerManager {
                 }
             },
         });
+        // -------------------------------------------------------------------------
+        // Re-subscription after device reconnect
+        // -------------------------------------------------------------------------
+        // subscribeAllAttributesAndEvents() establishes a one-shot subscription
+        // session with the device. If the device goes offline (Thread border router
+        // loses the device, Wi-Fi drop, power cycle, etc.) the session terminates
+        // silently — matter.js reconnects the CASE session automatically when the
+        // device reappears, but it does NOT re-subscribe.
+        //
+        // We listen to PairedNode.events.stateChanged. On Disconnected/Reconnecting
+        // we mark subscribed=false. On Connected (only after a prior disconnection)
+        // we call ensureSubscribed() to re-issue subscribeAllAttributesAndEvents.
+        //
+        // wasDisconnected guards against re-subscribing on the very first Connected
+        // event, which fires during connectNode() before this listener is registered.
+        //
+        // Remove any previous listener first — activateSubscriptions may be called
+        // again on each reconnect cycle.
+        const prevStateHandler = this.stateHandlers.get(nodeIdStr);
+        if (prevStateHandler)
+            node.events.stateChanged.off(prevStateHandler);
+        let wasDisconnected = false;
+        const stateHandler = (state) => {
+            const entry = this.connectedNodes.get(nodeIdStr);
+            if (!entry) {
+                // Node was removed — detach this listener
+                node.events.stateChanged.off(stateHandler);
+                this.stateHandlers.delete(nodeIdStr);
+                return;
+            }
+            if (state === device_1.NodeStates.Disconnected || state === device_1.NodeStates.Reconnecting) {
+                wasDisconnected = true;
+                entry.subscribed = false;
+                logger.info(`Node ${nodeIdStr} disconnected — subscription lost, will re-subscribe on reconnect`);
+            }
+            else if (state === device_1.NodeStates.Connected && wasDisconnected) {
+                wasDisconnected = false;
+                const hasHandlers = (this.attrHandlers.get(nodeIdStr)?.size ?? 0) > 0 ||
+                    (this.eventHandlers.get(nodeIdStr)?.size ?? 0) > 0;
+                if (hasHandlers) {
+                    logger.info(`Node ${nodeIdStr} reconnected — re-subscribing to attributes and events`);
+                    this.ensureSubscribed(nodeIdStr).catch(e => logger.warn(`Re-subscribe after reconnect failed for ${nodeIdStr}: ${e}`));
+                }
+            }
+        };
+        node.events.stateChanged.on(stateHandler);
+        this.stateHandlers.set(nodeIdStr, stateHandler);
         logger.info(`Subscribed to all attributes and events for node ${nodeIdStr}`);
     }
     // ----------- Device registry -------------------------------------------
@@ -480,6 +542,12 @@ class ControllerManager {
         const ctrl = this.requireController();
         const nodeId = (0, types_1.NodeId)(BigInt(nodeIdStr));
         // Clean up any active subscriptions / handlers before removing
+        const existingEntry = this.connectedNodes.get(nodeIdStr);
+        const existingStateHandler = this.stateHandlers.get(nodeIdStr);
+        if (existingEntry && existingStateHandler) {
+            existingEntry.node.events.stateChanged.off(existingStateHandler);
+        }
+        this.stateHandlers.delete(nodeIdStr);
         this.connectedNodes.delete(nodeIdStr);
         this.attrHandlers.delete(nodeIdStr);
         this.eventHandlers.delete(nodeIdStr);
