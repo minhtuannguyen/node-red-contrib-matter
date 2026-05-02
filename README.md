@@ -249,14 +249,70 @@ The edit dialog shows a **Device dropdown** populated from the registry and a **
 
 ## Device Registry
 
-The device registry is a JSON file persisted at `<storagePath>/node-red-matter/registry.json` (default: `~/.node-red-matter/node-red-matter/registry.json`).
+The device registry is the central store that connects the `matter-commission` node to all other nodes. Instead of manually typing node IDs, cluster IDs, and attribute names, every node's edit dialog loads the registry and shows human-readable **cascading dropdowns**.
 
-It is populated automatically:
-- **On commission** — `matter-commission` triggers a background discovery immediately after pairing
-- **On discover** — `matter-discover` always writes the latest structure to the registry
-- **On decommission** — `matter-decommission` removes the entry
+### How it works
 
-If a device does not appear in the dropdowns (e.g. the background discovery after commissioning failed for a sleepy Thread/ICD device), run `matter-discover` with the `nodeId` and then re-open the edit dialog.
+```
+commission → [auto-discover in background] → registry.json
+                                                  ↓
+                    command / read / subscribe / decommission / discover
+                    edit dialogs load registry → device dropdown
+```
+
+1. **Commission** a device with `matter-commission`. Immediately after the pairing handshake completes, the node triggers a background discovery that writes the device's label, node ID, and full cluster/attribute/command structure to the registry.
+2. **Open any other node's edit dialog**. The dialog fetches the registry from the controller's HTTP endpoint and populates a **Device** dropdown. Selecting a device pre-fills the node ID. Nodes that need more detail (command, read, subscribe) show further cascading dropdowns: Endpoint → Cluster → Attribute / Command / Event.
+3. **Refresh the registry** at any time by triggering a `matter-discover` node. This is useful if the background discovery after commissioning was slow (e.g. the device rebooted after joining the fabric) or if the device firmware updated and exposed new clusters.
+4. **Decommission** with `matter-decommission` — this removes the device from both the Matter fabric and the registry.
+
+### Registry file
+
+Persisted at `<storagePath>/node-red-matter/registry.json`  
+Default: `~/.node-red-matter/node-red-matter/registry.json`
+
+```json
+{
+  "7825526669137635300": {
+    "label": "Nuki Smart Lock",
+    "nodeId": "7825526669137635300",
+    "discoveredAt": "2026-05-01T12:00:00.000Z",
+    "discovery": {
+      "nodeId": "7825526669137635300",
+      "endpoints": [
+        {
+          "endpointId": 1,
+          "clusters": [
+            {
+              "clusterId": 257,
+              "clusterIdHex": "0101",
+              "clusterName": "DoorLock",
+              "attributes": ["lockState", "lockType", ...],
+              "commands": ["lockDoor", "unlockDoor", ...],
+              "events": ["doorLockAlarm", "lockOperation", ...]
+            }
+          ]
+        }
+      ]
+    }
+  }
+}
+```
+
+### Registry lifecycle
+
+| Event | Registry change |
+|---|---|
+| `matter-commission` completes | Entry added (background discovery, may take a few seconds) |
+| `matter-discover` is triggered | Entry updated with latest cluster structure |
+| `matter-decommission` runs | Entry removed |
+| Node-RED restart | Registry loaded from disk — no re-discovery needed |
+
+### Troubleshooting the dropdowns
+
+- **"select a controller first"** — no controller is selected or the controller config node is not deployed yet.
+- **"deploy the flow first, then re-open this dialog"** — the controller node has not been deployed. Click **Deploy** then re-open the edit dialog.
+- **Device not in dropdown after commissioning** — the background discovery may still be in progress (the device reboots after joining the fabric). Wait 10–15 seconds, then trigger `matter-discover` with `msg.nodeId` set to the commissioned node ID, and re-open the dialog.
+- **Dropdown shows a device but no endpoints** — the registry entry has no `discovery` data yet. Run `matter-discover` to populate it.
 
 ---
 
