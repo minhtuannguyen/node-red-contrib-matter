@@ -8,7 +8,8 @@
  */
 import "@matter/nodejs";
 
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync } from "node:fs";
+import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { CommissioningController } from "@project-chip/matter.js";
@@ -320,12 +321,15 @@ export class ControllerManager {
     };
 
     const nodeId = await ctrl.commissionNode(options as never);
-    logger.info(`Commissioned node: ${nodeId}`);
+    const nodeIdStr = nodeId.toString();
+    logger.info(`Commissioned node: ${nodeIdStr}`);
 
-    const nodeInfo = this.buildNodeInfo(await this.getOrConnectNode(nodeId.toString(), false));
-    // Auto-discover and register in background — don't block the commission response.
-    this.registerDevice(nodeInfo.nodeId, labelOverride).catch(e =>
-      logger.warn(`Device registration failed for ${nodeInfo.nodeId}: ${e}`),
+    // Do NOT connect immediately — device reboots after joining fabric and won't
+    // be reachable for several seconds. Return a minimal response right away and
+    // register (connect + discover) in the background once it's back online.
+    const nodeInfo: NodeInfo = { nodeId: nodeIdStr, endpoints: [] };
+    this.registerDevice(nodeIdStr, labelOverride).catch(e =>
+      logger.warn(`Device registration failed for ${nodeIdStr}: ${e}`),
     );
     return nodeInfo;
   }
@@ -449,6 +453,10 @@ export class ControllerManager {
    */
   async discoverDevice(nodeIdStr: string): Promise<DeviceDescription> {
     const node = await this.getOrConnectNode(nodeIdStr, false);
+    return this.buildDiscovery(nodeIdStr, node);
+  }
+
+  private buildDiscovery(nodeIdStr: string, node: PairedNode): DeviceDescription {
     const endpoints: EndpointDetail[] = [];
 
     // Include root endpoint (0) plus all child endpoints
@@ -632,8 +640,8 @@ export class ControllerManager {
 
     // Remove from registry and persist
     delete this.registry[nodeIdStr];
-    this.saveRegistrySync();
-    logger.info(`Removed device ${nodeIdStr} (force=${force})`);
+    this.saveRegistry();
+    logger.info(`Removed device ${nodeIdStr} (force=${force})`);  
   }
 
   /**
@@ -663,9 +671,10 @@ export class ControllerManager {
       } catch { /* fall back to default label */ }
     }
 
-    const discovery = await this.discoverDevice(nodeIdStr);
+    // Reuse the already-connected node — avoids a second getOrConnectNode call.
+    const discovery = this.buildDiscovery(nodeIdStr, node);
     this.registry[nodeIdStr] = { label, nodeId: nodeIdStr, discoveredAt: new Date().toISOString(), discovery };
-    this.saveRegistrySync();
+    this.saveRegistry();
     logger.info(`Registered device ${nodeIdStr} as "${label}"`);
   }
 
@@ -679,12 +688,10 @@ export class ControllerManager {
     }
   }
 
-  private saveRegistrySync(): void {
-    try {
-      writeFileSync(this.registryPath, JSON.stringify(this.registry, null, 2), "utf8");
-    } catch (e) {
-      logger.warn(`Failed to save device registry: ${e}`);
-    }
+  private saveRegistry(): void {
+    // Async write — never blocks the event loop (critical on Pi with slow SD card).
+    writeFile(this.registryPath, JSON.stringify(this.registry), "utf8")
+      .catch(e => logger.warn(`Failed to save device registry: ${e}`));
   }
 
   private buildNodeInfo(node: PairedNode): NodeInfo {

@@ -118,6 +118,7 @@ export declare class ControllerManager {
      * by inspecting the cluster client objects returned by matter.js.
      */
     discoverDevice(nodeIdStr: string): Promise<DeviceDescription>;
+    private buildDiscovery;
     /**
      * Register a callback that fires when any attribute on `nodeIdStr` changes.
      * Automatically enables subscription for that node the first time a handler
@@ -159,7 +160,7 @@ export declare class ControllerManager {
      */
     registerDevice(nodeIdStr: string, labelOverride?: string): Promise<void>;
     private loadRegistry;
-    private saveRegistrySync;
+    private saveRegistry;
     private buildNodeInfo;
     private getOrCreateHandlerSet;
 }

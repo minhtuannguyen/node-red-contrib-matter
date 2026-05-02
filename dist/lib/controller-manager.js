@@ -11,6 +11,7 @@ exports.ControllerManager = void 0;
  */
 require("@matter/nodejs");
 const node_fs_1 = require("node:fs");
+const promises_1 = require("node:fs/promises");
 const node_path_1 = require("node:path");
 const matter_js_1 = require("@project-chip/matter.js");
 const general_1 = require("@matter/general");
@@ -228,10 +229,13 @@ class ControllerManager {
             },
         };
         const nodeId = await ctrl.commissionNode(options);
-        logger.info(`Commissioned node: ${nodeId}`);
-        const nodeInfo = this.buildNodeInfo(await this.getOrConnectNode(nodeId.toString(), false));
-        // Auto-discover and register in background — don't block the commission response.
-        this.registerDevice(nodeInfo.nodeId, labelOverride).catch(e => logger.warn(`Device registration failed for ${nodeInfo.nodeId}: ${e}`));
+        const nodeIdStr = nodeId.toString();
+        logger.info(`Commissioned node: ${nodeIdStr}`);
+        // Do NOT connect immediately — device reboots after joining fabric and won't
+        // be reachable for several seconds. Return a minimal response right away and
+        // register (connect + discover) in the background once it's back online.
+        const nodeInfo = { nodeId: nodeIdStr, endpoints: [] };
+        this.registerDevice(nodeIdStr, labelOverride).catch(e => logger.warn(`Device registration failed for ${nodeIdStr}: ${e}`));
         return nodeInfo;
     }
     // ----------- Node access -----------------------------------------------
@@ -315,6 +319,9 @@ class ControllerManager {
      */
     async discoverDevice(nodeIdStr) {
         const node = await this.getOrConnectNode(nodeIdStr, false);
+        return this.buildDiscovery(nodeIdStr, node);
+    }
+    buildDiscovery(nodeIdStr, node) {
         const endpoints = [];
         // Include root endpoint (0) plus all child endpoints
         const rootDevice = node.getRootEndpoint();
@@ -479,7 +486,7 @@ class ControllerManager {
         await ctrl.removeNode(nodeId, !force);
         // Remove from registry and persist
         delete this.registry[nodeIdStr];
-        this.saveRegistrySync();
+        this.saveRegistry();
         logger.info(`Removed device ${nodeIdStr} (force=${force})`);
     }
     /**
@@ -510,9 +517,10 @@ class ControllerManager {
             }
             catch { /* fall back to default label */ }
         }
-        const discovery = await this.discoverDevice(nodeIdStr);
+        // Reuse the already-connected node — avoids a second getOrConnectNode call.
+        const discovery = this.buildDiscovery(nodeIdStr, node);
         this.registry[nodeIdStr] = { label, nodeId: nodeIdStr, discoveredAt: new Date().toISOString(), discovery };
-        this.saveRegistrySync();
+        this.saveRegistry();
         logger.info(`Registered device ${nodeIdStr} as "${label}"`);
     }
     loadRegistry() {
@@ -525,13 +533,10 @@ class ControllerManager {
             this.registry = {};
         }
     }
-    saveRegistrySync() {
-        try {
-            (0, node_fs_1.writeFileSync)(this.registryPath, JSON.stringify(this.registry, null, 2), "utf8");
-        }
-        catch (e) {
-            logger.warn(`Failed to save device registry: ${e}`);
-        }
+    saveRegistry() {
+        // Async write — never blocks the event loop (critical on Pi with slow SD card).
+        (0, promises_1.writeFile)(this.registryPath, JSON.stringify(this.registry), "utf8")
+            .catch(e => logger.warn(`Failed to save device registry: ${e}`));
     }
     buildNodeInfo(node) {
         const devices = node.getDevices();
