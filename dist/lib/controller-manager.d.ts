@@ -70,6 +70,12 @@ export declare class ControllerManager {
     private readonly attrHandlers;
     /** nodeId -> event handlers */
     private readonly eventHandlers;
+    /**
+     * Per-node subscription lock. If subscribeAllAttributesAndEvents() is already
+     * in progress for a node, concurrent callers await the same promise instead of
+     * each sending their own Subscribe Request to the device.
+     */
+    private readonly subscribingPromises;
     /** Persisted registry of commissioned devices with their discovery data */
     private registry;
     private registryPath;

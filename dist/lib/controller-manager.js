@@ -117,6 +117,12 @@ class ControllerManager {
     attrHandlers = new Map();
     /** nodeId -> event handlers */
     eventHandlers = new Map();
+    /**
+     * Per-node subscription lock. If subscribeAllAttributesAndEvents() is already
+     * in progress for a node, concurrent callers await the same promise instead of
+     * each sending their own Subscribe Request to the device.
+     */
+    subscribingPromises = new Map();
     /** Persisted registry of commissioned devices with their discovery data */
     registry = {};
     registryPath = "";
@@ -371,21 +377,35 @@ class ControllerManager {
     }
     async ensureSubscribed(nodeIdStr) {
         const existing = this.connectedNodes.get(nodeIdStr);
-        if (existing) {
-            if (!existing.subscribed) {
+        if (existing?.subscribed)
+            return;
+        // If another caller is already subscribing for this node, wait for that
+        // instead of sending a second Subscribe Request to the device.
+        const inFlight = this.subscribingPromises.get(nodeIdStr);
+        if (inFlight)
+            return inFlight;
+        const work = (async () => {
+            if (existing) {
                 await this.activateSubscriptions(nodeIdStr, existing.node);
                 existing.subscribed = true;
             }
-        }
-        else {
-            // Not yet connected — connect WITH subscriptions
-            await this.getOrConnectNode(nodeIdStr, true);
-        }
+            else {
+                // Not yet connected — connect WITH subscriptions
+                await this.getOrConnectNode(nodeIdStr, true);
+            }
+        })();
+        this.subscribingPromises.set(nodeIdStr, work.finally(() => {
+            this.subscribingPromises.delete(nodeIdStr);
+        }));
+        return work;
     }
     async activateSubscriptions(nodeIdStr, node) {
         // Pass callbacks directly — node.events.attributeChanged/eventTriggered are only
         // emitted by the internal autoSubscribe path, NOT when calling subscribeAllAttributesAndEvents
         // explicitly. Passing callbacks here is the correct way to receive updates.
+        //
+        // Devices can be slow to accept subscriptions right after (re)connecting — e.g. immediately
+        // after commissioning reboot or reconnect. Retry once after a short delay before giving up.
         await node.subscribeAllAttributesAndEvents({
             ignoreInitialTriggers: false,
             attributeChangedCallback: (data) => {
