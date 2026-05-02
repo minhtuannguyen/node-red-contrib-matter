@@ -1,4 +1,11 @@
 <script type="text/javascript">
+(function () {
+  function fillSel(sel, opts, curVal) {
+    sel.empty();
+    opts.forEach(function (o) { sel.append($('<option>').val(o.v).text(o.t)); });
+    if (curVal !== undefined && curVal !== null && String(curVal) !== '') sel.val(String(curVal));
+  }
+
   RED.nodes.registerType('matter-discover', {
     category:    'matter',
     color:       '#7CBBDE',
@@ -11,10 +18,42 @@
     outputs: 1,
     icon:    'font-awesome/fa-search',
     label: function () {
-      return this.name || (this.nodeId ? `discover: node ${this.nodeId}` : 'Matter Discover');
+      return this.name || (this.nodeId ? 'discover: node ' + this.nodeId : 'Matter Discover');
     },
-    paletteLabel: 'discover'
+    paletteLabel: 'discover',
+    oneditprepare: function () {
+      var self = this;
+
+      function loadRegistry(ctrlId) {
+        if (!ctrlId) {
+          fillSel($('#nr-md-device'), [{ v: '', t: '— select a controller first —' }]);
+          return;
+        }
+        fillSel($('#nr-md-device'), [{ v: '', t: '— loading… —' }]);
+        $.getJSON('/matter-nodes/' + ctrlId + '/registry')
+          .done(function (reg) {
+            var registry = reg || {};
+            var devOpts = [{ v: '', t: '— select commissioned device —' }];
+            Object.values(registry).forEach(function (e) {
+              devOpts.push({ v: e.nodeId, t: e.label + ' (' + e.nodeId + ')' });
+            });
+            fillSel($('#nr-md-device'), devOpts, $('#node-input-nodeId').val());
+            $('#nr-md-device').on('change', function () {
+              $('#node-input-nodeId').val($(this).val());
+            });
+          })
+          .fail(function (jqXHR) {
+            var hint = jqXHR.status === 0 ? 'cannot reach Node-RED'
+              : 'deploy the flow first, then re-open this dialog';
+            fillSel($('#nr-md-device'), [{ v: '', t: '— could not load registry (' + hint + ') —' }]);
+          });
+      }
+
+      $('#node-input-controller').on('change', function () { loadRegistry($(this).val()); });
+      loadRegistry(self.controller);
+    }
   });
+}());
 </script>
 
 <script type="text/html" data-template-name="matter-discover">
@@ -27,11 +66,14 @@
     <input type="text" id="node-input-controller">
   </div>
   <div class="form-row">
-    <label for="node-input-nodeId"><i class="fa fa-microchip"></i> Node ID</label>
-    <input type="text" id="node-input-nodeId" placeholder="e.g. 1 (decimal) — or set via msg.nodeId">
-    <div class="form-tips">
-      Commissioned node ID (decimal). Leave blank to use <code>msg.nodeId</code> at runtime.
-    </div>
+    <label for="nr-md-device"><i class="fa fa-microchip"></i> Device</label>
+    <select id="nr-md-device" style="width:70%">
+      <option value="">— select commissioned device —</option>
+    </select>
+  </div>
+  <input type="hidden" id="node-input-nodeId">
+  <div class="form-tips">
+    Select a commissioned device from the registry, or leave blank and pass <code>msg.nodeId</code> at runtime.
   </div>
 </script>
 
