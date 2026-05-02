@@ -200,7 +200,7 @@ class ControllerManager {
      *
      * Returns basic info about the newly-commissioned node.
      */
-    async commission(pairingCode, knownAddress) {
+    async commission(pairingCode, knownAddress, labelOverride) {
         await this.start();
         const ctrl = this.requireController();
         const { shortDiscriminator, passcode } = types_1.ManualPairingCodeCodec.decode(pairingCode);
@@ -225,7 +225,7 @@ class ControllerManager {
         logger.info(`Commissioned node: ${nodeId}`);
         const nodeInfo = this.buildNodeInfo(await this.getOrConnectNode(nodeId.toString(), false));
         // Auto-discover and register in background — don't block the commission response.
-        this.registerDevice(nodeInfo.nodeId).catch(e => logger.warn(`Device registration failed for ${nodeInfo.nodeId}: ${e}`));
+        this.registerDevice(nodeInfo.nodeId, labelOverride).catch(e => logger.warn(`Device registration failed for ${nodeInfo.nodeId}: ${e}`));
         return nodeInfo;
     }
     // ----------- Node access -----------------------------------------------
@@ -465,22 +465,31 @@ class ControllerManager {
     /**
      * Discovers a commissioned device and persists the result in the registry.
      * Called automatically after commissioning; can also be triggered manually.
+     *
+     * @param labelOverride  When provided, uses this as the registry label instead of
+     *                       the productName read from the device.
      */
-    async registerDevice(nodeIdStr) {
+    async registerDevice(nodeIdStr, labelOverride) {
         const node = await this.getOrConnectNode(nodeIdStr, false);
-        // Try to read productName from BasicInformation cluster (cluster 0x0028).
-        let label = "Device";
-        try {
-            const rootEp = node.getRootEndpoint();
-            const biClient = rootEp?.getClusterClientById((0, types_1.ClusterId)(0x0028));
-            if (biClient?.attributes?.["productName"]) {
-                // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                const name = await biClient.attributes["productName"].get(false);
-                if (name)
-                    label = String(name);
-            }
+        let label;
+        if (labelOverride && labelOverride.trim()) {
+            label = labelOverride.trim();
         }
-        catch { /* fall back to default label */ }
+        else {
+            // Try to read productName from BasicInformation cluster (cluster 0x0028).
+            label = "Device";
+            try {
+                const rootEp = node.getRootEndpoint();
+                const biClient = rootEp?.getClusterClientById((0, types_1.ClusterId)(0x0028));
+                if (biClient?.attributes?.["productName"]) {
+                    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                    const name = await biClient.attributes["productName"].get(false);
+                    if (name)
+                        label = String(name);
+                }
+            }
+            catch { /* fall back to default label */ }
+        }
         const discovery = await this.discoverDevice(nodeIdStr);
         this.registry[nodeIdStr] = { label, nodeId: nodeIdStr, discoveredAt: new Date().toISOString(), discovery };
         this.saveRegistrySync();

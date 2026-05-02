@@ -91,7 +91,7 @@ export declare class ControllerManager {
      *
      * Returns basic info about the newly-commissioned node.
      */
-    commission(pairingCode: string, knownAddress?: string): Promise<NodeInfo>;
+    commission(pairingCode: string, knownAddress?: string, labelOverride?: string): Promise<NodeInfo>;
     /**
      * Returns a list of commissioned node IDs (as decimal strings).
      */
@@ -147,8 +147,11 @@ export declare class ControllerManager {
     /**
      * Discovers a commissioned device and persists the result in the registry.
      * Called automatically after commissioning; can also be triggered manually.
+     *
+     * @param labelOverride  When provided, uses this as the registry label instead of
+     *                       the productName read from the device.
      */
-    registerDevice(nodeIdStr: string): Promise<void>;
+    registerDevice(nodeIdStr: string, labelOverride?: string): Promise<void>;
     private loadRegistry;
     private saveRegistrySync;
     private buildNodeInfo;

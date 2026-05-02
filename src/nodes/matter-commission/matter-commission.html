@@ -5,7 +5,8 @@
     defaults: {
       name:        { value: '' },
       controller:  { value: '', type: 'matter-controller', required: true },
-      pairingCode: { value: '' }
+      pairingCode: { value: '' },
+      deviceName:  { value: '' }
     },
     inputs:  1,
     outputs: 1,
@@ -39,6 +40,17 @@
       use <code>msg.payload.pairingCode</code> at runtime.
     </div>
   </div>
+  <div class="form-row">
+    <label for="node-input-deviceName">
+      <i class="fa fa-tag"></i> Device Name
+    </label>
+    <input type="text" id="node-input-deviceName" placeholder="e.g. Living Room Lock (optional)">
+    <div class="form-tips">
+      Friendly name shown in the device dropdown of other nodes. If left blank, the
+      device's product name is used (read from the device after commissioning).
+      Can be overridden at runtime via <code>msg.payload.deviceName</code>.
+    </div>
+  </div>
 </script>
 
 <script type="text/html" data-help-name="matter-commission">
@@ -47,6 +59,10 @@
   <dl class="message-properties">
     <dt>payload.pairingCode <span class="property-type">string</span></dt>
     <dd>11-digit manual pairing code. Overrides the code set in the node config.</dd>
+    <dt>payload.deviceName <span class="property-type">string</span></dt>
+    <dd>Friendly name stored in the device registry. Shown in the dropdown of command/read/subscribe/decommission nodes. Overrides the name set in the node config.</dd>
+    <dt>payload.knownAddress <span class="property-type">string</span></dt>
+    <dd>Optional IPv6/IPv4 address to skip mDNS discovery. Useful for Thread devices.</dd>
   </dl>
   <h3>Output</h3>
   <dl class="message-properties">

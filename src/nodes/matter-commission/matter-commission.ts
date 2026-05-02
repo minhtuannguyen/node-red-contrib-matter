@@ -4,6 +4,8 @@ import type { NodeRedAPI, NodeRedDef, NodeRedMessage, NodeRedNode } from "../../
 interface MatterCommissionConfig extends NodeRedDef {
   controller: string;
   pairingCode: string;
+  /** Optional friendly name stored in the device registry. Overridable via msg.payload.deviceName. */
+  deviceName: string;
 }
 
 module.exports = function (RED: NodeRedAPI) {
@@ -33,6 +35,12 @@ module.exports = function (RED: NodeRedAPI) {
       const knownAddress =
         (msg.payload as Record<string, unknown>)?.["knownAddress"] as string | undefined;
 
+      // Optional friendly name for the device registry.
+      // msg.payload.deviceName overrides the value configured in the node.
+      const deviceName: string | undefined =
+        ((msg.payload as Record<string, unknown>)?.["deviceName"] as string | undefined)
+        ?? (config.deviceName || undefined);
+
       if (!pairingCode) {
         const err = new Error(
           'Pairing code required: set msg.payload.pairingCode or configure it in the node.',
@@ -45,7 +53,7 @@ module.exports = function (RED: NodeRedAPI) {
       this.status({ fill: "yellow", shape: "dot", text: "commissioning…" });
 
       try {
-        const nodeInfo = await controllerNode.manager.commission(pairingCode.replace(/-/g, ""), knownAddress);
+        const nodeInfo = await controllerNode.manager.commission(pairingCode.replace(/-/g, ""), knownAddress, deviceName);
         this.status({ fill: "green", shape: "dot", text: `node ${nodeInfo.nodeId}` });
         const outMsg: NodeRedMessage = {
           ...msg,

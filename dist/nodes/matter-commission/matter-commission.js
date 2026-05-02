@@ -16,6 +16,10 @@ module.exports = function (RED) {
             // Optional: pass msg.payload.knownAddress (IPv6/IPv4) to bypass mDNS discovery.
             // Useful for Thread devices whose commissioning mDNS isn't bridged to IP network.
             const knownAddress = msg.payload?.["knownAddress"];
+            // Optional friendly name for the device registry.
+            // msg.payload.deviceName overrides the value configured in the node.
+            const deviceName = msg.payload?.["deviceName"]
+                ?? (config.deviceName || undefined);
             if (!pairingCode) {
                 const err = new Error('Pairing code required: set msg.payload.pairingCode or configure it in the node.');
                 this.status({ fill: "red", shape: "dot", text: "no pairing code" });
@@ -24,7 +28,7 @@ module.exports = function (RED) {
             }
             this.status({ fill: "yellow", shape: "dot", text: "commissioning…" });
             try {
-                const nodeInfo = await controllerNode.manager.commission(pairingCode.replace(/-/g, ""), knownAddress);
+                const nodeInfo = await controllerNode.manager.commission(pairingCode.replace(/-/g, ""), knownAddress, deviceName);
                 this.status({ fill: "green", shape: "dot", text: `node ${nodeInfo.nodeId}` });
                 const outMsg = {
                     ...msg,
