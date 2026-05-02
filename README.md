@@ -1,5 +1,7 @@
 # node-red-contrib-matter
 
+![Flow Example](pic/screenshot.png)
+
 A generic [Matter](https://csa-iot.org/all-solutions/matter/) protocol controller for [Node-RED](https://nodered.org/).  
 Commission and control **any Matter device** — smart locks, lights, sensors — directly from Node-RED flows over IP or Thread.
 
