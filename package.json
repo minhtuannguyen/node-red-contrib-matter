@@ -22,18 +22,20 @@
     "build": "tsc && npm run copy-html",
     "dev": "tsc --watch",
     "prepublishOnly": "npm run build",
-    "clean": "rm -rf dist"
+    "clean": "rm -rf dist",
+    "test": "jest",
+    "test:coverage": "jest --coverage"
   },
   "node-red": {
     "version": ">=3.0.0",
     "nodes": {
       "matter-controller": "dist/nodes/matter-controller/matter-controller.js",
-      "matter-commission":    "dist/nodes/matter-commission/matter-commission.js",
+      "matter-commission": "dist/nodes/matter-commission/matter-commission.js",
       "matter-decommission": "dist/nodes/matter-decommission/matter-decommission.js",
-      "matter-discover":     "dist/nodes/matter-discover/matter-discover.js",
-      "matter-command":      "dist/nodes/matter-command/matter-command.js",
-      "matter-read":         "dist/nodes/matter-read/matter-read.js",
-      "matter-subscribe":    "dist/nodes/matter-subscribe/matter-subscribe.js"
+      "matter-discover": "dist/nodes/matter-discover/matter-discover.js",
+      "matter-command": "dist/nodes/matter-command/matter-command.js",
+      "matter-read": "dist/nodes/matter-read/matter-read.js",
+      "matter-subscribe": "dist/nodes/matter-subscribe/matter-subscribe.js"
     }
   },
   "dependencies": {
@@ -44,6 +46,9 @@
     "typescript": "^5.4.0"
   },
   "devDependencies": {
-    "@types/node": "^20.0.0"
+    "@types/jest": "^30.0.0",
+    "@types/node": "^20.0.0",
+    "jest": "^30.3.0",
+    "ts-jest": "^29.4.9"
   }
 }
