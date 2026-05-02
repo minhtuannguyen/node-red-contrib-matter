@@ -45,7 +45,8 @@ export interface AttributeChangedEvent {
     clusterId: number;
     attributeName: string;
     value: unknown;
-    timestamp: Date;
+    /** ISO-8601 string — avoids heap-allocating a Date object in the hot callback path. */
+    timestamp: string;
 }
 export interface EventTriggeredEvent {
     nodeId: string;
@@ -53,7 +54,8 @@ export interface EventTriggeredEvent {
     clusterId: number;
     eventName: string;
     events: unknown[];
-    timestamp: Date;
+    /** ISO-8601 string — avoids heap-allocating a Date object in the hot callback path. */
+    timestamp: string;
 }
 export type AttributeChangeHandler = (event: AttributeChangedEvent) => void;
 export type EventTriggeredHandler = (event: EventTriggeredEvent) => void;

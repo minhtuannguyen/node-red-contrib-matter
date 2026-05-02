@@ -419,13 +419,15 @@ class ControllerManager {
                 const handlers = this.attrHandlers.get(nodeIdStr);
                 if (!handlers?.size)
                     return;
+                // Use ISO string — string primitive avoids a heap-allocated Date object
+                // on every attribute change (reduces GC pressure on Pi).
                 const event = {
                     nodeId: nodeIdStr,
                     endpointId: data.path.endpointId,
                     clusterId: data.path.clusterId,
                     attributeName: data.path.attributeName,
                     value: data.value,
-                    timestamp: new Date(),
+                    timestamp: new Date().toISOString(),
                 };
                 for (const h of handlers) {
                     try {
@@ -444,7 +446,7 @@ class ControllerManager {
                     clusterId: data.path.clusterId,
                     eventName: data.path.eventName,
                     events: data.events,
-                    timestamp: new Date(),
+                    timestamp: new Date().toISOString(),
                 };
                 for (const h of handlers) {
                     try {

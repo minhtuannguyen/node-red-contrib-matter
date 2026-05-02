@@ -152,7 +152,8 @@ export interface AttributeChangedEvent {
   clusterId: number;
   attributeName: string;
   value: unknown;
-  timestamp: Date;
+  /** ISO-8601 string — avoids heap-allocating a Date object in the hot callback path. */
+  timestamp: string;
 }
 
 export interface EventTriggeredEvent {
@@ -161,7 +162,8 @@ export interface EventTriggeredEvent {
   clusterId: number;
   eventName: string;
   events: unknown[];
-  timestamp: Date;
+  /** ISO-8601 string — avoids heap-allocating a Date object in the hot callback path. */
+  timestamp: string;
 }
 
 export type AttributeChangeHandler = (event: AttributeChangedEvent) => void;
@@ -574,13 +576,15 @@ export class ControllerManager {
       attributeChangedCallback: (data) => {
         const handlers = this.attrHandlers.get(nodeIdStr);
         if (!handlers?.size) return;
+        // Use ISO string — string primitive avoids a heap-allocated Date object
+        // on every attribute change (reduces GC pressure on Pi).
         const event: AttributeChangedEvent = {
           nodeId: nodeIdStr,
           endpointId: data.path.endpointId,
           clusterId: data.path.clusterId,
           attributeName: data.path.attributeName,
           value: data.value,
-          timestamp: new Date(),
+          timestamp: new Date().toISOString(),
         };
         for (const h of handlers) {
           try { h(event); } catch { /* keep other handlers running */ }
@@ -595,7 +599,7 @@ export class ControllerManager {
           clusterId: data.path.clusterId,
           eventName: data.path.eventName,
           events: data.events,
-          timestamp: new Date(),
+          timestamp: new Date().toISOString(),
         };
         for (const h of handlers) {
           try { h(event); } catch { /* keep other handlers running */ }

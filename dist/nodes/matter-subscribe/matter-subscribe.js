@@ -36,7 +36,7 @@ module.exports = function (RED) {
                     clusterId: event.clusterId,
                     attributeName: event.attributeName,
                     value: event.value,
-                    timestamp: event.timestamp.toISOString(),
+                    timestamp: event.timestamp,
                 },
                 topic: event.attributeName,
             };
@@ -57,7 +57,7 @@ module.exports = function (RED) {
                     clusterId: event.clusterId,
                     eventName: event.eventName,
                     events: event.events,
-                    timestamp: event.timestamp.toISOString(),
+                    timestamp: event.timestamp,
                 },
                 topic: event.eventName,
             };
