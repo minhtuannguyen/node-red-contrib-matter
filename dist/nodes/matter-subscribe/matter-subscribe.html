@@ -16,7 +16,8 @@
       endpointId:    { value: '' },
       clusterId:     { value: '' },
       attributeName: { value: '' },
-      eventName:     { value: '' }
+      eventName:     { value: '' },
+      readInitialState: { value: false }
     },
     inputs:  0,
     outputs: 1,
@@ -168,6 +169,11 @@
     <label for="node-input-eventName"><i class="fa fa-bell"></i> Event filter</label>
     <input type="text" id="node-input-eventName" placeholder="e.g. lockOperation (all events)">
   </div>
+  <div class="form-row">
+    <label for="node-input-readInitialState"><i class="fa fa-download"></i> Initial state</label>
+    <input type="checkbox" id="node-input-readInitialState" style="display:inline-block; width:auto; margin-top:4px;">
+    <span style="margin-left:8px;">Emit current attribute values on start</span>
+  </div>
 </script>
 
 <script type="text/html" data-help-name="matter-subscribe">
@@ -254,8 +260,11 @@
   <div class="form-row">
     <label for="node-input-eventName"><i class="fa fa-bell"></i> Event Filter</label>
     <input type="text" id="node-input-eventName" placeholder="e.g. doorLockAlarm (all events)">
-  </div>
-</script>
+  </div>  <div class="form-row">
+    <label for="node-input-readInitialState"><i class="fa fa-download"></i> Initial state</label>
+    <input type="checkbox" id="node-input-readInitialState" style="display:inline-block; width:auto; margin-top:4px;">
+    <span style="margin-left:8px;">Emit current attribute values on start</span>
+  </div></script>
 
 <script type="text/html" data-help-name="matter-subscribe">
   <p>
