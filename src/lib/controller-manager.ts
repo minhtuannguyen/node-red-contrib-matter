@@ -461,6 +461,37 @@ export class ControllerManager {
   }
 
   /**
+   * Read an attribute value from the local subscription cache without making
+   * a network round trip. Useful for emitting initial state right after a
+   * subscription is established.
+   */
+  async readCachedAttribute(
+    nodeIdStr: string,
+    endpointId: number,
+    clusterId: number,
+    attributeName: string,
+  ): Promise<unknown> {
+    const node = await this.getOrConnectNode(nodeIdStr, false);
+    const client = node
+      .getDeviceById(EndpointNumber(endpointId))
+      ?.getClusterClientById(ClusterId(clusterId));
+
+    if (!client) {
+      throw new Error(
+        `Cluster 0x${clusterId.toString(16)} not found on endpoint ${endpointId} of node ${nodeIdStr}`,
+      );
+    }
+    const attrClient = client.attributes[attributeName];
+    if (!attrClient) {
+      throw new Error(
+        `Attribute "${attributeName}" not found in cluster 0x${clusterId.toString(16)}`,
+      );
+    }
+    // false = read from local cache populated by subscription, no network round trip
+    return await attrClient.get(false);
+  }
+
+  /**
    * Discover all endpoints and clusters of a commissioned node.
    * For each cluster, lists the available attribute names and command names
    * by inspecting the cluster client objects returned by matter.js.
@@ -522,7 +553,9 @@ export class ControllerManager {
   }
 
   removeAttributeHandler(nodeIdStr: string, handler: AttributeChangeHandler): void {
-    this.attrHandlers.get(nodeIdStr)?.delete(handler);
+    const set = this.attrHandlers.get(nodeIdStr);
+    set?.delete(handler);
+    if (set?.size === 0) this.attrHandlers.delete(nodeIdStr);
   }
 
   /**
@@ -539,7 +572,9 @@ export class ControllerManager {
   }
 
   removeEventHandler(nodeIdStr: string, handler: EventTriggeredHandler): void {
-    this.eventHandlers.get(nodeIdStr)?.delete(handler);
+    const set = this.eventHandlers.get(nodeIdStr);
+    set?.delete(handler);
+    if (set?.size === 0) this.eventHandlers.delete(nodeIdStr);
   }
 
   // ----------- Private helpers -------------------------------------------
@@ -584,7 +619,7 @@ export class ControllerManager {
     // Devices can be slow to accept subscriptions right after (re)connecting — e.g. immediately
     // after commissioning reboot or reconnect. Retry once after a short delay before giving up.
     await node.subscribeAllAttributesAndEvents({
-      ignoreInitialTriggers: false,
+      ignoreInitialTriggers: true,
       attributeChangedCallback: (data) => {
         const handlers = this.attrHandlers.get(nodeIdStr);
         if (!handlers?.size) return;
@@ -610,7 +645,7 @@ export class ControllerManager {
           endpointId: data.path.endpointId,
           clusterId: data.path.clusterId,
           eventName: data.path.eventName,
-          events: data.events,
+          events: [...data.events],
           timestamp: new Date().toISOString(),
         };
         for (const h of handlers) {

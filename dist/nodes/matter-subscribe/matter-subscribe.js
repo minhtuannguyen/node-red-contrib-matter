@@ -68,8 +68,44 @@ module.exports = function (RED) {
         controllerNode.manager
             .addAttributeHandler(nodeId, attrHandler)
             .then(() => controllerNode.manager.addEventHandler(nodeId, evtHandler))
-            .then(() => {
+            .then(async () => {
             this.status({ fill: "green", shape: "dot", text: `subscribed — node ${nodeId}` });
+            if (!config.readInitialState)
+                return;
+            const registry = controllerNode.manager.getRegistry();
+            const entry = registry[nodeId];
+            const endpoints = entry?.discovery?.endpoints ?? [];
+            const now = new Date().toISOString();
+            for (const ep of endpoints) {
+                if (filterEndpoint !== undefined && ep.endpointId !== filterEndpoint)
+                    continue;
+                for (const cl of ep.clusters) {
+                    if (filterCluster !== undefined && cl.clusterId !== filterCluster)
+                        continue;
+                    for (const attrName of cl.attributes) {
+                        if (filterAttrName !== undefined && attrName !== filterAttrName)
+                            continue;
+                        try {
+                            const value = await controllerNode.manager.readCachedAttribute(nodeId, ep.endpointId, cl.clusterId, attrName);
+                            this.send({
+                                payload: {
+                                    type: "attribute",
+                                    nodeId,
+                                    endpointId: ep.endpointId,
+                                    clusterId: cl.clusterId,
+                                    attributeName: attrName,
+                                    value,
+                                    timestamp: now,
+                                },
+                                topic: attrName,
+                            });
+                        }
+                        catch {
+                            // attribute not yet in local cache — skip silently
+                        }
+                    }
+                }
+            }
         })
             .catch((err) => {
             this.status({ fill: "red", shape: "dot", text: err.message.slice(0, 40) });

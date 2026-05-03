@@ -121,6 +121,12 @@ export declare class ControllerManager {
     invokeCommand(nodeIdStr: string, endpointId: number, clusterId: number, commandName: string, args: Record<string, unknown>): Promise<unknown>;
     readAttribute(nodeIdStr: string, endpointId: number, clusterId: number, attributeName: string): Promise<unknown>;
     /**
+     * Read an attribute value from the local subscription cache without making
+     * a network round trip. Useful for emitting initial state right after a
+     * subscription is established.
+     */
+    readCachedAttribute(nodeIdStr: string, endpointId: number, clusterId: number, attributeName: string): Promise<unknown>;
+    /**
      * Discover all endpoints and clusters of a commissioned node.
      * For each cluster, lists the available attribute names and command names
      * by inspecting the cluster client objects returned by matter.js.
