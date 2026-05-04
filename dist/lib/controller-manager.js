@@ -370,10 +370,11 @@ class ControllerManager {
             const clusters = [];
             for (const client of device.getAllClusterClients()) {
                 const clusterId = client.id;
-                const attributes = Object.keys(client.attributes);
-                const commands = Object.keys(client.commands);
+                const isNamed = (k) => isNaN(Number(k));
+                const attributes = Object.keys(client.attributes).filter(isNamed);
+                const commands = Object.keys(client.commands).filter(isNamed);
                 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                const events = client.events ? Object.keys(client.events) : [];
+                const events = client.events ? Object.keys(client.events).filter(isNamed) : [];
                 clusters.push({
                     clusterId,
                     clusterIdHex: clusterId.toString(16).toUpperCase().padStart(4, "0"),
@@ -469,6 +470,7 @@ class ControllerManager {
                     nodeId: nodeIdStr,
                     endpointId: data.path.endpointId,
                     clusterId: data.path.clusterId,
+                    clusterName: CLUSTER_NAMES[data.path.clusterId] ?? `0x${data.path.clusterId.toString(16).toUpperCase().padStart(4, '0')}`,
                     attributeName: data.path.attributeName,
                     value: data.value,
                     timestamp: new Date().toISOString(),
@@ -488,6 +490,7 @@ class ControllerManager {
                     nodeId: nodeIdStr,
                     endpointId: data.path.endpointId,
                     clusterId: data.path.clusterId,
+                    clusterName: CLUSTER_NAMES[data.path.clusterId] ?? `0x${data.path.clusterId.toString(16).toUpperCase().padStart(4, '0')}`,
                     eventName: data.path.eventName,
                     events: [...data.events],
                     timestamp: new Date().toISOString(),
@@ -677,6 +680,27 @@ class ControllerManager {
         try {
             const data = (0, node_fs_1.readFileSync)(this.registryPath, "utf8");
             this.registry = JSON.parse(data);
+            // Migrate: strip pure-numeric attribute/command/event keys left by older versions
+            const isNamed = (k) => isNaN(Number(k));
+            let migrated = false;
+            for (const entry of Object.values(this.registry)) {
+                for (const ep of entry.discovery?.endpoints ?? []) {
+                    for (const cl of ep.clusters ?? []) {
+                        const aLen = cl.attributes.length;
+                        const cLen = cl.commands.length;
+                        const eLen = cl.events.length;
+                        cl.attributes = cl.attributes.filter(isNamed);
+                        cl.commands = cl.commands.filter(isNamed);
+                        cl.events = cl.events.filter(isNamed);
+                        if (cl.attributes.length !== aLen || cl.commands.length !== cLen || cl.events.length !== eLen)
+                            migrated = true;
+                    }
+                }
+            }
+            if (migrated) {
+                logger.info("Migrated device registry — removed numeric attribute/command/event keys");
+                this.saveRegistry();
+            }
             logger.info(`Loaded device registry — ${Object.keys(this.registry).length} entries`);
         }
         catch {

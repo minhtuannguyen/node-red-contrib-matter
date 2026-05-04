@@ -43,6 +43,7 @@ export interface AttributeChangedEvent {
     nodeId: string;
     endpointId: number;
     clusterId: number;
+    clusterName: string;
     attributeName: string;
     value: unknown;
     /** ISO-8601 string — avoids heap-allocating a Date object in the hot callback path. */
@@ -52,6 +53,7 @@ export interface EventTriggeredEvent {
     nodeId: string;
     endpointId: number;
     clusterId: number;
+    clusterName: string;
     eventName: string;
     events: unknown[];
     /** ISO-8601 string — avoids heap-allocating a Date object in the hot callback path. */
