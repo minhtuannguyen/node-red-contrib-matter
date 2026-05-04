@@ -58,7 +58,7 @@
                   });
               });
               $row
-                .append($('<span style="font-size:0.8em;color:#999;min-width:48px;">').text('…' + entry.nodeId.slice(-6)))
+                .append($('<span style="font-size:0.8em;color:#999;min-width:80px;">').text(entry.nodeId.slice(0, 4) + '…' + entry.nodeId.slice(-4)))
                 .append($input)
                 .append($btn);
               $list.append($row);
