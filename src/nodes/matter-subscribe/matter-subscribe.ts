@@ -56,18 +56,23 @@ module.exports = function (RED: NodeRedAPI) {
     const filterOperator  = config.filterOperator || '';
     const filterValue     = config.filterValue    ?? '';
 
-    // Pre-coerce filterValue: use number when possible, otherwise keep as string
-    const filterValueCoerced: unknown = filterValue !== '' && !isNaN(Number(filterValue))
-      ? Number(filterValue)
-      : filterValue;
+    // Pre-coerce filterValue: boolean → string → number priority
+    const filterValueCoerced: unknown =
+      filterValue === 'true'  ? true  :
+      filterValue === 'false' ? false :
+      (filterValue !== '' && !isNaN(Number(filterValue))) ? Number(filterValue) :
+      filterValue;
 
     const matchesValueFilter = (raw: unknown): boolean => {
       if (!filterOperator || filterValue === '') return true;
-      const av: unknown = typeof raw === 'number' ? raw
-        : (raw !== null && raw !== undefined && !isNaN(Number(raw)) ? Number(raw) : raw);
+      // Coerce the incoming value the same way
+      const av: unknown =
+        typeof raw === 'boolean' ? raw :
+        typeof raw === 'number'  ? raw :
+        (raw !== null && raw !== undefined && !isNaN(Number(raw)) ? Number(raw) : raw);
       switch (filterOperator) {
-        case '==': return av == filterValueCoerced;   // eslint-disable-line eqeqeq
-        case '!=': return av != filterValueCoerced;   // eslint-disable-line eqeqeq
+        case '==': return av === filterValueCoerced;
+        case '!=': return av !== filterValueCoerced;
         case '<':  return (av as number) <  (filterValueCoerced as number);
         case '<=': return (av as number) <= (filterValueCoerced as number);
         case '>':  return (av as number) >  (filterValueCoerced as number);

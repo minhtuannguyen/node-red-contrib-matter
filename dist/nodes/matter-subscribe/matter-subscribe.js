@@ -22,18 +22,21 @@ module.exports = function (RED) {
         const filterEventName = config.eventName || undefined;
         const filterOperator = config.filterOperator || '';
         const filterValue = config.filterValue ?? '';
-        // Pre-coerce filterValue: use number when possible, otherwise keep as string
-        const filterValueCoerced = filterValue !== '' && !isNaN(Number(filterValue))
-            ? Number(filterValue)
-            : filterValue;
+        // Pre-coerce filterValue: boolean → string → number priority
+        const filterValueCoerced = filterValue === 'true' ? true :
+            filterValue === 'false' ? false :
+                (filterValue !== '' && !isNaN(Number(filterValue))) ? Number(filterValue) :
+                    filterValue;
         const matchesValueFilter = (raw) => {
             if (!filterOperator || filterValue === '')
                 return true;
-            const av = typeof raw === 'number' ? raw
-                : (raw !== null && raw !== undefined && !isNaN(Number(raw)) ? Number(raw) : raw);
+            // Coerce the incoming value the same way
+            const av = typeof raw === 'boolean' ? raw :
+                typeof raw === 'number' ? raw :
+                    (raw !== null && raw !== undefined && !isNaN(Number(raw)) ? Number(raw) : raw);
             switch (filterOperator) {
-                case '==': return av == filterValueCoerced; // eslint-disable-line eqeqeq
-                case '!=': return av != filterValueCoerced; // eslint-disable-line eqeqeq
+                case '==': return av === filterValueCoerced;
+                case '!=': return av !== filterValueCoerced;
                 case '<': return av < filterValueCoerced;
                 case '<=': return av <= filterValueCoerced;
                 case '>': return av > filterValueCoerced;
