@@ -21,14 +21,25 @@ module.exports = function (RED: NodeRedAPI) {
     "/matter-nodes/:id/registry",
     (req, res) => {
       const ctrl = RED.nodes.getNode(req.params["id"]) as MatterControllerNode | null;
-      // Return empty registry (200) when the controller node isn't in the
-      // runtime yet (e.g. flow not deployed). The UI will show an empty
-      // device list rather than an error, which is less confusing.
       if (!ctrl?.manager) {
         res.json({});
         return;
       }
       res.json(ctrl.manager.getRegistry());
+    },
+  );
+
+  RED.httpAdmin.post(
+    "/matter-nodes/:id/rediscover",
+    (req, res) => {
+      const ctrl = RED.nodes.getNode(req.params["id"]) as MatterControllerNode | null;
+      if (!ctrl?.manager) {
+        res.status(404).json({ error: "Controller not found or not started" });
+        return;
+      }
+      ctrl.manager.rediscoverAll()
+        .then(() => res.json({ ok: true }))
+        .catch((e: Error) => res.status(500).json({ error: e.message }));
     },
   );
 

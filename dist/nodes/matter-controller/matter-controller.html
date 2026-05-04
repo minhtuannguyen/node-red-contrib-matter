@@ -9,6 +9,23 @@
     },
     label: function () {
       return this.name || 'Matter Controller';
+    },
+    oneditprepare: function () {
+      var nodeId = this.id;
+      $('#nr-mc-rediscover').on('click', function () {
+        var $btn = $(this);
+        $btn.prop('disabled', true).text('Rediscovering…');
+        $.ajax({ method: 'POST', url: '/matter-nodes/' + nodeId + '/rediscover' })
+          .done(function () {
+            $btn.text('Done ✓');
+            setTimeout(function () { $btn.prop('disabled', false).text('Rediscover all devices'); }, 3000);
+          })
+          .fail(function (jqXHR) {
+            var msg = (jqXHR.responseJSON && jqXHR.responseJSON.error) || jqXHR.statusText;
+            $btn.text('Failed: ' + msg);
+            setTimeout(function () { $btn.prop('disabled', false).text('Rediscover all devices'); }, 4000);
+          });
+      });
     }
   });
 </script>
@@ -43,5 +60,13 @@
       <option value="Info" selected>Info</option>
       <option value="Debug">Debug</option>
     </select>
+  </div>
+  <div class="form-row">
+    <label><i class="fa fa-refresh"></i> Rediscover</label>
+    <button type="button" id="nr-mc-rediscover" class="red-ui-button">Rediscover all devices</button>
+    <div class="form-tips" style="margin-top:4px;">
+      Use after moving a HomePod / Thread Border Router. Forces all devices to
+      be re-found via mDNS and updates their cached addresses.
+    </div>
   </div>
 </script>

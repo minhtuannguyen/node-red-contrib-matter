@@ -63,5 +63,6 @@ export interface NodeRedAPI {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   httpAdmin: {
     get(path: string, ...handlers: ((req: any, res: any, next?: any) => void)[]): void;
+    post(path: string, ...handlers: ((req: any, res: any, next?: any) => void)[]): void;
   };
 }

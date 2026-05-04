@@ -756,6 +756,50 @@ export class ControllerManager {
   }
 
   /**
+   * Re-discover all registered devices — forces matter.js to reconnect via
+   * mDNS and refresh its internal peer address cache. Useful after a Thread
+   * Border Router (e.g. HomePod) moves and all device IPv6 addresses change.
+   *
+   * Nodes that have active attribute/event subscriptions are automatically
+   * re-subscribed after reconnection.
+   */
+  async rediscoverAll(): Promise<void> {
+    const nodeIds = Object.keys(this.registry);
+    logger.info(`Rediscovering ${nodeIds.length} device(s)…`);
+
+    await Promise.allSettled(nodeIds.map(async (nodeIdStr) => {
+      // Drop our cached connection so getOrConnectNode creates a fresh one.
+      // matter.js will perform operational discovery (mDNS) to find the new
+      // address on the next connectNode() call.
+      const entry = this.connectedNodes.get(nodeIdStr);
+      const prevStateHandler = this.stateHandlers.get(nodeIdStr);
+      if (entry && prevStateHandler) {
+        entry.node.events.stateChanged.off(prevStateHandler);
+      }
+      this.stateHandlers.delete(nodeIdStr);
+      this.connectedNodes.delete(nodeIdStr);
+      this.subscribingPromises.delete(nodeIdStr);
+
+      const hasHandlers =
+        (this.attrHandlers.get(nodeIdStr)?.size ?? 0) > 0 ||
+        (this.eventHandlers.get(nodeIdStr)?.size ?? 0) > 0;
+
+      try {
+        // withSubscription=true re-subscribes nodes that had active handlers;
+        // withSubscription=false just re-establishes the connection.
+        await this.getOrConnectNode(nodeIdStr, hasHandlers);
+        // Refresh discovery info in registry with fresh cluster/attribute data.
+        await this.registerDevice(nodeIdStr);
+        logger.info(`Rediscovered node ${nodeIdStr}`);
+      } catch (e) {
+        logger.warn(`Rediscover failed for node ${nodeIdStr}: ${e}`);
+      }
+    }));
+
+    logger.info("Rediscovery complete");
+  }
+
+  /**
    * Discovers a commissioned device and persists the result in the registry.
    * Called automatically after commissioning; can also be triggered manually.
    *
