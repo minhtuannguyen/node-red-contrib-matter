@@ -20,6 +20,27 @@ module.exports = function (RED) {
         const filterCluster = config.clusterId ? parseInt(config.clusterId, 16) : undefined;
         const filterAttrName = config.attributeName || undefined;
         const filterEventName = config.eventName || undefined;
+        const filterOperator = config.filterOperator || '';
+        const filterValue = config.filterValue ?? '';
+        // Pre-coerce filterValue: use number when possible, otherwise keep as string
+        const filterValueCoerced = filterValue !== '' && !isNaN(Number(filterValue))
+            ? Number(filterValue)
+            : filterValue;
+        const matchesValueFilter = (raw) => {
+            if (!filterOperator || filterValue === '')
+                return true;
+            const av = typeof raw === 'number' ? raw
+                : (raw !== null && raw !== undefined && !isNaN(Number(raw)) ? Number(raw) : raw);
+            switch (filterOperator) {
+                case '==': return av == filterValueCoerced; // eslint-disable-line eqeqeq
+                case '!=': return av != filterValueCoerced; // eslint-disable-line eqeqeq
+                case '<': return av < filterValueCoerced;
+                case '<=': return av <= filterValueCoerced;
+                case '>': return av > filterValueCoerced;
+                case '>=': return av >= filterValueCoerced;
+                default: return true;
+            }
+        };
         // Use a stable reference so we can remove it on close
         const attrHandler = (event) => {
             if (filterEndpoint !== undefined && event.endpointId !== filterEndpoint)
@@ -27,6 +48,8 @@ module.exports = function (RED) {
             if (filterCluster !== undefined && event.clusterId !== filterCluster)
                 return;
             if (filterAttrName !== undefined && event.attributeName !== filterAttrName)
+                return;
+            if (!matchesValueFilter(event.value))
                 return;
             const msg = {
                 payload: {

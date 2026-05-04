@@ -17,7 +17,9 @@
       clusterId:     { value: '' },
       attributeName: { value: '' },
       eventName:     { value: '' },
-      readInitialState: { value: false }
+      readInitialState: { value: false },
+      filterOperator: { value: '' },
+      filterValue:    { value: '' }
     },
     inputs:  0,
     outputs: 1,
@@ -173,6 +175,19 @@
     <label for="node-input-readInitialState"><i class="fa fa-download"></i> Initial state</label>
     <input type="checkbox" id="node-input-readInitialState" style="display:inline-block; width:auto; margin-top:4px;">
     <span style="margin-left:8px;">Emit current attribute values on start</span>
+  </div>
+  <div class="form-row">
+    <label for="node-input-filterOperator"><i class="fa fa-filter"></i> Value condition</label>
+    <select id="node-input-filterOperator" style="width:32%; display:inline-block; margin-right:4px">
+      <option value="">— always emit —</option>
+      <option value="==">= equals</option>
+      <option value="!=">≠ not equals</option>
+      <option value="<">&lt; less than</option>
+      <option value="<=">&lt;= less or equal</option>
+      <option value=">">&gt; greater than</option>
+      <option value=">=">&gt;= greater or equal</option>
+    </select>
+    <input type="text" id="node-input-filterValue" style="width:32%; display:inline-block" placeholder="e.g. 2">
   </div>
 </script>
 

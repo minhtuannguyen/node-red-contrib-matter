@@ -20,6 +20,10 @@ interface MatterSubscribeConfig extends NodeRedDef {
   eventName: string;
   /** When true, emit cached attribute values immediately after subscribing */
   readInitialState: boolean;
+  /** Comparison operator for value filter: '', '==', '!=', '<', '<=', '>', '>=' */
+  filterOperator: string;
+  /** Value to compare against (string, coerced to number when both sides are numeric) */
+  filterValue: string;
 }
 
 module.exports = function (RED: NodeRedAPI) {
@@ -49,12 +53,35 @@ module.exports = function (RED: NodeRedAPI) {
     const filterCluster   = config.clusterId   ? parseInt(config.clusterId, 16)   : undefined;
     const filterAttrName  = config.attributeName  || undefined;
     const filterEventName = config.eventName      || undefined;
+    const filterOperator  = config.filterOperator || '';
+    const filterValue     = config.filterValue    ?? '';
+
+    // Pre-coerce filterValue: use number when possible, otherwise keep as string
+    const filterValueCoerced: unknown = filterValue !== '' && !isNaN(Number(filterValue))
+      ? Number(filterValue)
+      : filterValue;
+
+    const matchesValueFilter = (raw: unknown): boolean => {
+      if (!filterOperator || filterValue === '') return true;
+      const av: unknown = typeof raw === 'number' ? raw
+        : (raw !== null && raw !== undefined && !isNaN(Number(raw)) ? Number(raw) : raw);
+      switch (filterOperator) {
+        case '==': return av == filterValueCoerced;   // eslint-disable-line eqeqeq
+        case '!=': return av != filterValueCoerced;   // eslint-disable-line eqeqeq
+        case '<':  return (av as number) <  (filterValueCoerced as number);
+        case '<=': return (av as number) <= (filterValueCoerced as number);
+        case '>':  return (av as number) >  (filterValueCoerced as number);
+        case '>=': return (av as number) >= (filterValueCoerced as number);
+        default:   return true;
+      }
+    };
 
     // Use a stable reference so we can remove it on close
     const attrHandler: AttributeChangeHandler = (event: AttributeChangedEvent) => {
       if (filterEndpoint  !== undefined && event.endpointId  !== filterEndpoint)  return;
       if (filterCluster   !== undefined && event.clusterId   !== filterCluster)   return;
       if (filterAttrName  !== undefined && event.attributeName !== filterAttrName) return;
+      if (!matchesValueFilter(event.value)) return;
 
       const msg: NodeRedMessage = {
         payload: {
