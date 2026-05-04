@@ -166,6 +166,10 @@ export declare class ControllerManager {
      */
     removeDevice(nodeIdStr: string, force?: boolean): Promise<void>;
     /**
+     * Rename a device in the registry without reconnecting.
+     */
+    renameDevice(nodeIdStr: string, newLabel: string): void;
+    /**
      * Re-discover all registered devices — forces matter.js to reconnect via
      * mDNS and refresh its internal peer address cache. Useful after a Thread
      * Border Router (e.g. HomePod) moves and all device IPv6 addresses change.

@@ -26,6 +26,49 @@
             setTimeout(function () { $btn.prop('disabled', false).text('Rediscover all devices'); }, 4000);
           });
       });
+
+      function loadDevices() {
+        var $list = $('#nr-mc-device-list').empty();
+        $.getJSON('/matter-nodes/' + nodeId + '/registry')
+          .done(function (reg) {
+            var entries = Object.values(reg || {});
+            if (!entries.length) {
+              $list.html('<li style="color:#999;padding:4px 0">No commissioned devices</li>');
+              return;
+            }
+            entries.forEach(function (e) {
+              var entry = e;
+              var $row = $('<li style="display:flex;align-items:center;gap:6px;margin:4px 0;">');
+              var $input = $('<input type="text" style="flex:1;height:28px;border:1px solid #ccc;border-radius:3px;padding:0 6px;">').val(entry.label);
+              var $btn = $('<button type="button" class="red-ui-button" style="white-space:nowrap;">Rename</button>');
+              $btn.on('click', function () {
+                var newLabel = String($input.val()).trim();
+                if (!newLabel) return;
+                $btn.prop('disabled', true).text('…');
+                $.ajax({
+                  method: 'POST',
+                  url: '/matter-nodes/' + nodeId + '/registry/' + entry.nodeId + '/rename',
+                  contentType: 'application/json',
+                  data: JSON.stringify({ label: newLabel })
+                })
+                  .done(function () { $btn.prop('disabled', false).text('Rename'); })
+                  .fail(function (jqXHR) {
+                    var msg = (jqXHR.responseJSON && jqXHR.responseJSON.error) || 'error';
+                    $btn.prop('disabled', false).text('Failed: ' + msg);
+                  });
+              });
+              $row
+                .append($('<span style="font-size:0.8em;color:#999;min-width:48px;">').text('…' + entry.nodeId.slice(-6)))
+                .append($input)
+                .append($btn);
+              $list.append($row);
+            });
+          })
+          .fail(function () {
+            $list.html('<li style="color:#999;padding:4px 0">Deploy the flow first to load devices</li>');
+          });
+      }
+      loadDevices();
     }
   });
 </script>
@@ -68,5 +111,11 @@
       Use after moving a HomePod / Thread Border Router. Forces all devices to
       be re-found via mDNS and updates their cached addresses.
     </div>
+  </div>
+  <div class="form-row">
+    <label><i class="fa fa-pencil"></i> Devices</label>
+    <ul id="nr-mc-device-list" style="list-style:none;padding:0;margin:0;width:70%">
+      <li style="color:#999;padding:4px 0">Loading…</li>
+    </ul>
   </div>
 </script>

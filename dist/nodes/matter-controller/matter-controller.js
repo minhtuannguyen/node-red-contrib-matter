@@ -24,6 +24,26 @@ module.exports = function (RED) {
             .then(() => res.json({ ok: true }))
             .catch((e) => res.status(500).json({ error: e.message }));
     });
+    RED.httpAdmin.post("/matter-nodes/:id/registry/:nodeId/rename", (req, res) => {
+        const ctrl = RED.nodes.getNode(req.params["id"]);
+        if (!ctrl?.manager) {
+            res.status(404).json({ error: "Controller not found or not started" });
+            return;
+        }
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const label = req.body?.label ?? "";
+        if (!label.trim()) {
+            res.status(400).json({ error: "label is required" });
+            return;
+        }
+        try {
+            ctrl.manager.renameDevice(req.params["nodeId"], label);
+            res.json({ ok: true });
+        }
+        catch (e) {
+            res.status(404).json({ error: e.message });
+        }
+    });
     function MatterController(config) {
         RED.nodes.createNode(this, config);
         const storagePath = config.storagePath || `${process.env["HOME"]}/.node-red-matter`;

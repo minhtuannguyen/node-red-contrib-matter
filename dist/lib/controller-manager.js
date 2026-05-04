@@ -589,6 +589,17 @@ class ControllerManager {
         logger.info(`Removed device ${nodeIdStr} (force=${force})`);
     }
     /**
+     * Rename a device in the registry without reconnecting.
+     */
+    renameDevice(nodeIdStr, newLabel) {
+        const entry = this.registry[nodeIdStr];
+        if (!entry)
+            throw new Error(`Device ${nodeIdStr} not found in registry`);
+        entry.label = newLabel.trim();
+        this.saveRegistry();
+        logger.info(`Renamed device ${nodeIdStr} to "${entry.label}"`);
+    }
+    /**
      * Re-discover all registered devices — forces matter.js to reconnect via
      * mDNS and refresh its internal peer address cache. Useful after a Thread
      * Border Router (e.g. HomePod) moves and all device IPv6 addresses change.
@@ -617,8 +628,9 @@ class ControllerManager {
                 // withSubscription=true re-subscribes nodes that had active handlers;
                 // withSubscription=false just re-establishes the connection.
                 await this.getOrConnectNode(nodeIdStr, hasHandlers);
-                // Refresh discovery info in registry with fresh cluster/attribute data.
-                await this.registerDevice(nodeIdStr);
+                // Preserve the existing label — the user may have renamed the device.
+                const existingLabel = this.registry[nodeIdStr]?.label;
+                await this.registerDevice(nodeIdStr, existingLabel);
                 logger.info(`Rediscovered node ${nodeIdStr}`);
             }
             catch (e) {
