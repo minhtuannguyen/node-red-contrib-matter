@@ -67,9 +67,15 @@
               $.getJSON('/matter-nodes/' + nodeId + '/registry/' + entry.nodeId + '/signal')
                 .done(function (s) {
                   var color = s.level === 'good' ? '#27ae60' : s.level === 'fair' ? '#f39c12' : s.level === 'poor' ? '#e74c3c' : '#aaa';
-                  var tip = s.type === 'Thread'
-                    ? 'Thread' + (s.rssi !== undefined ? '  RSSI: ' + s.rssi + ' dBm' : '') + (s.lqi !== undefined ? '  LQI: ' + s.lqi : '')
-                    : 'no Thread diagnostics';
+                  var parts = [];
+                  if (s.rssi !== undefined) parts.push('RSSI: ' + s.rssi + ' dBm (radio signal strength to nearest neighbor; ≥-70 good, ≥-85 fair, <-85 poor)');
+                  if (s.lqi !== undefined) parts.push('LQI: ' + s.lqi + ' (link quality index 0–255; higher = cleaner signal)');
+                  if (s.neighborCount !== undefined) parts.push('Neighbors: ' + s.neighborCount + ' (direct Thread nodes in range; 1 = single point of failure)');
+                  if (s.detachedCount !== undefined) parts.push('Detached: ' + s.detachedCount + (s.detachedCount > 0 ? ' ⚠' : ' ✓') + ' (times lost from network since last boot; >0 means real connectivity problems)');
+                  if (s.parentChanges !== undefined) parts.push('Parent changes: ' + s.parentChanges + ' (times switched router parent; high = unstable mesh)');
+                  if (s.attachAttempts !== undefined) parts.push('Attach attempts: ' + s.attachAttempts + ' (total join attempts since last boot; high vs detached ratio = struggled to join)');
+                  var tip = s.type === 'Thread' ? (parts.length ? parts.join('
+') : 'Thread (no diagnostics available)') : 'no Thread diagnostics';
                   $dot.css('background', color).attr('title', tip);
                 })
                 .fail(function () { $dot.css('background', '#aaa').attr('title', 'signal unavailable'); });

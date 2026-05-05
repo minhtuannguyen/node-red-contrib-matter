@@ -149,10 +149,18 @@ export interface NodeInfo {
 
 export interface SignalInfo {
   type: 'Thread' | 'unknown';
-  /** Minimum neighbor RSSI in dBm (worst direct link) */
+  /** Minimum neighbor RSSI in dBm — used for color */
   rssi?: number;
   /** Average neighbor LQI (0–255) */
   lqi?: number;
+  /** Number of direct Thread neighbors */
+  neighborCount?: number;
+  /** Times this device detached from the network since last boot */
+  detachedCount?: number;
+  /** Times this device changed its parent router since last boot */
+  parentChanges?: number;
+  /** Total connection attempts since last boot */
+  attachAttempts?: number;
   level: 'good' | 'fair' | 'poor' | 'unknown';
 }
 
@@ -506,33 +514,57 @@ export class ControllerManager {
   }
 
   /**
-   * Read Thread signal strength from ThreadNetworkDiagnostics (cluster 0x0035, endpoint 0).
-   * Uses neighborTable — each entry has the RSSI/LQI of one direct Thread neighbor.
-   * Returns the minimum RSSI (weakest link) and average LQI across all neighbors.
-   * level: 'good' >= -70 dBm, 'fair' >= -85 dBm, 'poor' < -85 dBm.
+   * Read Thread diagnostics from ThreadNetworkDiagnostics (cluster 0x0035, endpoint 0).
+   * Color is based on min neighbor RSSI (best proxy for raw radio signal).
+   * All stability counters are included for the hover tooltip.
    */
   async readSignalStrength(nodeIdStr: string): Promise<SignalInfo> {
     const node = await this.getOrConnectNode(nodeIdStr, false);
     const ep0  = node.getDeviceById(EndpointNumber(0));
     const threadClient = ep0?.getClusterClientById(ClusterId(0x0035));
-    if (!threadClient?.attributes['neighborTable']) {
-      return { type: 'unknown', level: 'unknown' };
+    if (!threadClient) return { type: 'unknown', level: 'unknown' };
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const readAttr = async (name: string): Promise<any> => {
+      if (!threadClient.attributes[name]) return undefined;
+      try { return await (threadClient.attributes[name] as any).get(true); } catch { return undefined; }
+    };
+
+    const [neighborTable, detachedCount, parentChanges, attachAttempts] = await Promise.all([
+      readAttr('neighborTable'),
+      readAttr('detachedRoleCount'),
+      readAttr('parentChangeCount'),
+      readAttr('attachAttemptCount'),
+    ]);
+
+    let minRssi: number | undefined;
+    let avgLqi: number | undefined;
+    let neighborCount: number | undefined;
+
+    if (Array.isArray(neighborTable) && neighborTable.length > 0) {
+      neighborCount = neighborTable.length;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const rssis = (neighborTable.map((n: any) => n.averageRssi ?? n.lastRssi) as unknown[]).filter((r): r is number => typeof r === 'number');
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const lqis  = (neighborTable.map((n: any) => n.lqi) as unknown[]).filter((l): l is number => typeof l === 'number');
+      minRssi = rssis.length ? Math.min(...rssis) : undefined;
+      avgLqi  = lqis.length  ? Math.round(lqis.reduce((a, b) => a + b, 0) / lqis.length) : undefined;
     }
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const table: any[] = await (threadClient.attributes['neighborTable'] as any).get(true);
-    if (!Array.isArray(table) || table.length === 0) {
-      return { type: 'Thread', level: 'unknown' };
-    }
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const rssis = (table.map((n: any) => n.averageRssi ?? n.lastRssi) as unknown[]).filter((r): r is number => typeof r === 'number');
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const lqis  = (table.map((n: any) => n.lqi) as unknown[]).filter((l): l is number => typeof l === 'number');
-    const minRssi = rssis.length ? Math.min(...rssis) : undefined;
-    const avgLqi  = lqis.length  ? Math.round(lqis.reduce((a, b) => a + b, 0) / lqis.length) : undefined;
+
     const level: SignalInfo['level'] = minRssi !== undefined
       ? (minRssi >= -70 ? 'good' : minRssi >= -85 ? 'fair' : 'poor')
       : (avgLqi  !== undefined ? (avgLqi >= 180 ? 'good' : avgLqi >= 100 ? 'fair' : 'poor') : 'unknown');
-    return { type: 'Thread', rssi: minRssi, lqi: avgLqi, level };
+
+    return {
+      type: 'Thread',
+      rssi: minRssi,
+      lqi: avgLqi,
+      neighborCount,
+      detachedCount:  typeof detachedCount  === 'number' ? detachedCount  : undefined,
+      parentChanges:  typeof parentChanges   === 'number' ? parentChanges   : undefined,
+      attachAttempts: typeof attachAttempts  === 'number' ? attachAttempts  : undefined,
+      level,
+    };
   }
 
   /**

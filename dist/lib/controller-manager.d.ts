@@ -41,10 +41,18 @@ export interface NodeInfo {
 }
 export interface SignalInfo {
     type: 'Thread' | 'unknown';
-    /** Minimum neighbor RSSI in dBm (worst direct link) */
+    /** Minimum neighbor RSSI in dBm — used for color */
     rssi?: number;
     /** Average neighbor LQI (0–255) */
     lqi?: number;
+    /** Number of direct Thread neighbors */
+    neighborCount?: number;
+    /** Times this device detached from the network since last boot */
+    detachedCount?: number;
+    /** Times this device changed its parent router since last boot */
+    parentChanges?: number;
+    /** Total connection attempts since last boot */
+    attachAttempts?: number;
     level: 'good' | 'fair' | 'poor' | 'unknown';
 }
 export interface AttributeChangedEvent {
@@ -137,10 +145,9 @@ export declare class ControllerManager {
      */
     readCachedAttribute(nodeIdStr: string, endpointId: number, clusterId: number, attributeName: string): Promise<unknown>;
     /**
-     * Read Thread signal strength from ThreadNetworkDiagnostics (cluster 0x0035, endpoint 0).
-     * Uses neighborTable — each entry has the RSSI/LQI of one direct Thread neighbor.
-     * Returns the minimum RSSI (weakest link) and average LQI across all neighbors.
-     * level: 'good' >= -70 dBm, 'fair' >= -85 dBm, 'poor' < -85 dBm.
+     * Read Thread diagnostics from ThreadNetworkDiagnostics (cluster 0x0035, endpoint 0).
+     * Color is based on min neighbor RSSI (best proxy for raw radio signal).
+     * All stability counters are included for the hover tooltip.
      */
     readSignalStrength(nodeIdStr: string): Promise<SignalInfo>;
     /**
