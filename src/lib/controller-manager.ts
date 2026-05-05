@@ -147,6 +147,15 @@ export interface NodeInfo {
   endpoints: EndpointInfo[];
 }
 
+export interface SignalInfo {
+  type: 'Thread' | 'unknown';
+  /** Minimum neighbor RSSI in dBm (worst direct link) */
+  rssi?: number;
+  /** Average neighbor LQI (0–255) */
+  lqi?: number;
+  level: 'good' | 'fair' | 'poor' | 'unknown';
+}
+
 export interface AttributeChangedEvent {
   nodeId: string;
   endpointId: number;
@@ -494,6 +503,36 @@ export class ControllerManager {
     }
     // false = read from local cache populated by subscription, no network round trip
     return await attrClient.get(false);
+  }
+
+  /**
+   * Read Thread signal strength from ThreadNetworkDiagnostics (cluster 0x0035, endpoint 0).
+   * Uses neighborTable — each entry has the RSSI/LQI of one direct Thread neighbor.
+   * Returns the minimum RSSI (weakest link) and average LQI across all neighbors.
+   * level: 'good' >= -70 dBm, 'fair' >= -85 dBm, 'poor' < -85 dBm.
+   */
+  async readSignalStrength(nodeIdStr: string): Promise<SignalInfo> {
+    const node = await this.getOrConnectNode(nodeIdStr, false);
+    const ep0  = node.getDeviceById(EndpointNumber(0));
+    const threadClient = ep0?.getClusterClientById(ClusterId(0x0035));
+    if (!threadClient?.attributes['neighborTable']) {
+      return { type: 'unknown', level: 'unknown' };
+    }
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const table: any[] = await (threadClient.attributes['neighborTable'] as any).get(true);
+    if (!Array.isArray(table) || table.length === 0) {
+      return { type: 'Thread', level: 'unknown' };
+    }
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const rssis = (table.map((n: any) => n.averageRssi ?? n.lastRssi) as unknown[]).filter((r): r is number => typeof r === 'number');
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const lqis  = (table.map((n: any) => n.lqi) as unknown[]).filter((l): l is number => typeof l === 'number');
+    const minRssi = rssis.length ? Math.min(...rssis) : undefined;
+    const avgLqi  = lqis.length  ? Math.round(lqis.reduce((a, b) => a + b, 0) / lqis.length) : undefined;
+    const level: SignalInfo['level'] = minRssi !== undefined
+      ? (minRssi >= -70 ? 'good' : minRssi >= -85 ? 'fair' : 'poor')
+      : (avgLqi  !== undefined ? (avgLqi >= 180 ? 'good' : avgLqi >= 100 ? 'fair' : 'poor') : 'unknown');
+    return { type: 'Thread', rssi: minRssi, lqi: avgLqi, level };
   }
 
   /**

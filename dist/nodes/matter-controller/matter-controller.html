@@ -39,6 +39,7 @@
             entries.forEach(function (e) {
               var entry = e;
               var $row = $('<li style="display:flex;align-items:center;gap:6px;margin:4px 0;">');
+              var $dot = $('<span title="checking signal…" style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#ccc;flex-shrink:0;"></span>');
               var $input = $('<input type="text" style="flex:1;height:28px;border:1px solid #ccc;border-radius:3px;padding:0 6px;">').val(entry.label);
               var $btn = $('<button type="button" class="red-ui-button" style="white-space:nowrap;">Rename</button>');
               $btn.on('click', function () {
@@ -58,10 +59,20 @@
                   });
               });
               $row
+                .append($dot)
                 .append($('<span style="font-size:0.8em;color:#999;min-width:80px;">').text(entry.nodeId.slice(0, 4) + '…' + entry.nodeId.slice(-4)))
                 .append($input)
                 .append($btn);
               $list.append($row);
+              $.getJSON('/matter-nodes/' + nodeId + '/registry/' + entry.nodeId + '/signal')
+                .done(function (s) {
+                  var color = s.level === 'good' ? '#27ae60' : s.level === 'fair' ? '#f39c12' : s.level === 'poor' ? '#e74c3c' : '#aaa';
+                  var tip = s.type === 'Thread'
+                    ? 'Thread' + (s.rssi !== undefined ? '  RSSI: ' + s.rssi + ' dBm' : '') + (s.lqi !== undefined ? '  LQI: ' + s.lqi : '')
+                    : 'no Thread diagnostics';
+                  $dot.css('background', color).attr('title', tip);
+                })
+                .fail(function () { $dot.css('background', '#aaa').attr('title', 'signal unavailable'); });
             });
           })
           .fail(function () {

@@ -351,6 +351,35 @@ class ControllerManager {
         return await attrClient.get(false);
     }
     /**
+     * Read Thread signal strength from ThreadNetworkDiagnostics (cluster 0x0035, endpoint 0).
+     * Uses neighborTable — each entry has the RSSI/LQI of one direct Thread neighbor.
+     * Returns the minimum RSSI (weakest link) and average LQI across all neighbors.
+     * level: 'good' >= -70 dBm, 'fair' >= -85 dBm, 'poor' < -85 dBm.
+     */
+    async readSignalStrength(nodeIdStr) {
+        const node = await this.getOrConnectNode(nodeIdStr, false);
+        const ep0 = node.getDeviceById((0, types_1.EndpointNumber)(0));
+        const threadClient = ep0?.getClusterClientById((0, types_1.ClusterId)(0x0035));
+        if (!threadClient?.attributes['neighborTable']) {
+            return { type: 'unknown', level: 'unknown' };
+        }
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const table = await threadClient.attributes['neighborTable'].get(true);
+        if (!Array.isArray(table) || table.length === 0) {
+            return { type: 'Thread', level: 'unknown' };
+        }
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const rssis = table.map((n) => n.averageRssi ?? n.lastRssi).filter((r) => typeof r === 'number');
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const lqis = table.map((n) => n.lqi).filter((l) => typeof l === 'number');
+        const minRssi = rssis.length ? Math.min(...rssis) : undefined;
+        const avgLqi = lqis.length ? Math.round(lqis.reduce((a, b) => a + b, 0) / lqis.length) : undefined;
+        const level = minRssi !== undefined
+            ? (minRssi >= -70 ? 'good' : minRssi >= -85 ? 'fair' : 'poor')
+            : (avgLqi !== undefined ? (avgLqi >= 180 ? 'good' : avgLqi >= 100 ? 'fair' : 'poor') : 'unknown');
+        return { type: 'Thread', rssi: minRssi, lqi: avgLqi, level };
+    }
+    /**
      * Discover all endpoints and clusters of a commissioned node.
      * For each cluster, lists the available attribute names and command names
      * by inspecting the cluster client objects returned by matter.js.

@@ -39,6 +39,14 @@ export interface NodeInfo {
     nodeId: string;
     endpoints: EndpointInfo[];
 }
+export interface SignalInfo {
+    type: 'Thread' | 'unknown';
+    /** Minimum neighbor RSSI in dBm (worst direct link) */
+    rssi?: number;
+    /** Average neighbor LQI (0–255) */
+    lqi?: number;
+    level: 'good' | 'fair' | 'poor' | 'unknown';
+}
 export interface AttributeChangedEvent {
     nodeId: string;
     endpointId: number;
@@ -128,6 +136,13 @@ export declare class ControllerManager {
      * subscription is established.
      */
     readCachedAttribute(nodeIdStr: string, endpointId: number, clusterId: number, attributeName: string): Promise<unknown>;
+    /**
+     * Read Thread signal strength from ThreadNetworkDiagnostics (cluster 0x0035, endpoint 0).
+     * Uses neighborTable — each entry has the RSSI/LQI of one direct Thread neighbor.
+     * Returns the minimum RSSI (weakest link) and average LQI across all neighbors.
+     * level: 'good' >= -70 dBm, 'fair' >= -85 dBm, 'poor' < -85 dBm.
+     */
+    readSignalStrength(nodeIdStr: string): Promise<SignalInfo>;
     /**
      * Discover all endpoints and clusters of a commissioned node.
      * For each cluster, lists the available attribute names and command names

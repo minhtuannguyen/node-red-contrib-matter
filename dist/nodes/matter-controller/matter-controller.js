@@ -24,6 +24,16 @@ module.exports = function (RED) {
             .then(() => res.json({ ok: true }))
             .catch((e) => res.status(500).json({ error: e.message }));
     });
+    RED.httpAdmin.get("/matter-nodes/:id/registry/:nodeId/signal", (req, res) => {
+        const ctrl = RED.nodes.getNode(req.params["id"]);
+        if (!ctrl?.manager) {
+            res.status(404).json({ error: "Controller not found or not started" });
+            return;
+        }
+        ctrl.manager.readSignalStrength(req.params["nodeId"])
+            .then((info) => res.json(info))
+            .catch((e) => res.status(500).json({ error: e.message }));
+    });
     RED.httpAdmin.post("/matter-nodes/:id/registry/:nodeId/rename", (req, res) => {
         const ctrl = RED.nodes.getNode(req.params["id"]);
         if (!ctrl?.manager) {
