@@ -140,10 +140,12 @@
             entries.forEach(function (e) {
               var entry = e;
               var $row = $('<li style="display:flex;align-items:center;gap:6px;margin:4px 0;">');
-              var $dot = $('<span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#ccc;flex-shrink:0;"></span>');
-              var $input = $('<input type="text" style="flex:1;height:28px;border:1px solid #ccc;border-radius:3px;padding:0 6px;">').val(entry.label);
+              var $dot = $('<span title="Click for signal details" style="display:inline-block;width:14px;height:14px;border-radius:50%;background:#ccc;flex-shrink:0;cursor:pointer;"></span>');
+              var $input = $('<input type="text" style="flex:1;min-width:180px;height:30px;border:1px solid #ccc;border-radius:3px;padding:0 8px;font-size:0.95em;">').val(entry.label);
               var $renameBtn = $('<button type="button" class="red-ui-button" style="white-space:nowrap;">Rename</button>');
-              var $detailBtn = $('<button type="button" class="red-ui-button" style="white-space:nowrap;">Details</button>');
+              $dot.on('click', function () {
+                showSignalOverlay(String($input.val()) || entry.label, signalCache[entry.nodeId]);
+              });
               $renameBtn.on('click', function () {
                 var newLabel = String($input.val()).trim();
                 if (!newLabel) return;
@@ -160,15 +162,11 @@
                     $renameBtn.prop('disabled', false).text('Failed: ' + msg);
                   });
               });
-              $detailBtn.on('click', function () {
-                showSignalOverlay(String($input.val()) || entry.label, signalCache[entry.nodeId]);
-              });
               $row
                 .append($dot)
                 .append($('<span style="font-size:0.8em;color:#999;min-width:80px;">').text(entry.nodeId.slice(0, 4) + '…' + entry.nodeId.slice(-4)))
                 .append($input)
-                .append($renameBtn)
-                .append($detailBtn);
+                .append($renameBtn);
               $list.append($row);
               // Stagger: one signal request every 300ms, reads from cache so each is fast
               (function($d, $row_dot, nodeIdVal) {
