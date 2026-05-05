@@ -74,8 +74,7 @@
                   if (s.detachedCount !== undefined) parts.push('Detached: ' + s.detachedCount + (s.detachedCount > 0 ? ' ⚠' : ' ✓') + ' (times lost from network since last boot; >0 means real connectivity problems)');
                   if (s.parentChanges !== undefined) parts.push('Parent changes: ' + s.parentChanges + ' (times switched router parent; high = unstable mesh)');
                   if (s.attachAttempts !== undefined) parts.push('Attach attempts: ' + s.attachAttempts + ' (total join attempts since last boot; high vs detached ratio = struggled to join)');
-                  var tip = s.type === 'Thread' ? (parts.length ? parts.join('
-') : 'Thread (no diagnostics available)') : 'no Thread diagnostics';
+                  var tip = s.type === 'Thread' ? (parts.length ? parts.join('\n') : 'Thread (no diagnostics available)') : 'no Thread diagnostics';
                   $dot.css('background', color).attr('title', tip);
                 })
                 .fail(function () { $dot.css('background', '#aaa').attr('title', 'signal unavailable'); });
