@@ -146,8 +146,9 @@ export declare class ControllerManager {
     readCachedAttribute(nodeIdStr: string, endpointId: number, clusterId: number, attributeName: string): Promise<unknown>;
     /**
      * Read Thread diagnostics from ThreadNetworkDiagnostics (cluster 0x0035, endpoint 0).
+     * Reads from the local subscription cache (get(false)) — no network round trip.
+     * Data is already populated by the active subscription session.
      * Color is based on min neighbor RSSI (best proxy for raw radio signal).
-     * All stability counters are included for the hover tooltip.
      */
     readSignalStrength(nodeIdStr: string): Promise<SignalInfo>;
     /**

@@ -27,6 +27,104 @@
           });
       });
 
+      // Signal data cache keyed by nodeId
+      var signalCache = {};
+
+      // Overlay panel for signal details
+      var $overlay = $('<div id="nr-mc-signal-overlay" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;z-index:9999;background:rgba(0,0,0,0.45);">' +
+        '<div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);background:#fff;border-radius:6px;padding:20px 24px;min-width:560px;max-width:90vw;box-shadow:0 8px 32px rgba(0,0,0,0.28);">' +
+          '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">' +
+            '<strong id="nr-mc-overlay-title" style="font-size:1.05em;"></strong>' +
+            '<button type="button" id="nr-mc-overlay-close" style="background:none;border:none;font-size:1.4em;cursor:pointer;color:#666;line-height:1;">×</button>' +
+          '</div>' +
+          '<table id="nr-mc-overlay-table" style="width:100%;border-collapse:collapse;font-size:0.9em;">' +
+            '<thead><tr style="background:#f4f4f4;">' +
+              '<th style="text-align:left;padding:7px 10px;border-bottom:2px solid #ddd;">Metric</th>' +
+              '<th style="text-align:left;padding:7px 10px;border-bottom:2px solid #ddd;">Value</th>' +
+              '<th style="text-align:left;padding:7px 10px;border-bottom:2px solid #ddd;">Assessment</th>' +
+              '<th style="text-align:left;padding:7px 10px;border-bottom:2px solid #ddd;">Explanation</th>' +
+            '</tr></thead>' +
+            '<tbody id="nr-mc-overlay-body"></tbody>' +
+          '</table>' +
+          '<div id="nr-mc-overlay-msg" style="padding:12px 0;color:#999;"></div>' +
+        '</div>' +
+      '</div>');
+      $('body').append($overlay);
+      $('#nr-mc-overlay-close').on('click', function () { $overlay.hide(); });
+      $overlay.on('click', function (ev) { if (ev.target === this) $overlay.hide(); });
+
+      function assessRssi(v) {
+        if (v === undefined) return { a: '—', c: '' };
+        return v >= -70 ? { a: '✓ Good', c: '#27ae60' } : v >= -85 ? { a: '⚠ Fair', c: '#f39c12' } : { a: '✗ Poor', c: '#e74c3c' };
+      }
+      function assessLqi(v) {
+        if (v === undefined) return { a: '—', c: '' };
+        return v >= 200 ? { a: '✓ Good', c: '#27ae60' } : v >= 100 ? { a: '⚠ Fair', c: '#f39c12' } : { a: '✗ Poor', c: '#e74c3c' };
+      }
+      function assessNeighbors(v) {
+        if (v === undefined) return { a: '—', c: '' };
+        return v >= 3 ? { a: '✓ Good', c: '#27ae60' } : v === 2 ? { a: '⚠ Fair', c: '#f39c12' } : { a: '✗ Single point of failure', c: '#e74c3c' };
+      }
+      function assessDetached(v) {
+        if (v === undefined) return { a: '—', c: '' };
+        return v === 0 ? { a: '✓ Good', c: '#27ae60' } : v <= 2 ? { a: '⚠ Occasional', c: '#f39c12' } : { a: '✗ Frequent', c: '#e74c3c' };
+      }
+      function assessParentChanges(v) {
+        if (v === undefined) return { a: '—', c: '' };
+        return v === 0 ? { a: '✓ Stable', c: '#27ae60' } : v <= 3 ? { a: '⚠ Some instability', c: '#f39c12' } : { a: '✗ Unstable', c: '#e74c3c' };
+      }
+      function assessAttachAttempts(v, detached) {
+        if (v === undefined) return { a: '—', c: '' };
+        var ratio = detached > 0 ? v / detached : 0;
+        return v <= 3 ? { a: '✓ Normal', c: '#27ae60' } : ratio > 5 ? { a: '✗ Struggled to join', c: '#e74c3c' } : { a: '⚠ Elevated', c: '#f39c12' };
+      }
+
+      function makeRow(metric, value, assess, explain) {
+        var $tr = $('<tr style="border-bottom:1px solid #eee;">');
+        $tr.append($('<td style="padding:7px 10px;font-weight:500;">').text(metric));
+        $tr.append($('<td style="padding:7px 10px;font-family:monospace;">').text(value !== undefined ? String(value) : '—'));
+        var $a = $('<td style="padding:7px 10px;white-space:nowrap;">');
+        if (assess.c) $a.append($('<span>').css('color', assess.c).text(assess.a)); else $a.text(assess.a);
+        $tr.append($a);
+        $tr.append($('<td style="padding:7px 10px;color:#555;font-size:0.88em;">').text(explain));
+        return $tr;
+      }
+
+      function showSignalOverlay(label, s) {
+        $('#nr-mc-overlay-title').text(label + ' — Thread diagnostics');
+        var $body = $('#nr-mc-overlay-body').empty();
+        $('#nr-mc-overlay-msg').empty();
+        if (!s || s.type === 'unknown') {
+          $('#nr-mc-overlay-msg').text('No Thread diagnostics cluster found on this device (may be Wi-Fi only or not yet connected).');
+          $overlay.show(); return;
+        }
+        $body.append(makeRow('RSSI',
+          s.rssi !== undefined ? s.rssi + ' dBm' : undefined,
+          assessRssi(s.rssi),
+          'Radio signal strength to nearest Thread neighbor. ≥ -70 dBm good, ≥ -85 fair, below -85 poor. Lower (more negative) = weaker.'));
+        $body.append(makeRow('LQI',
+          s.lqi,
+          assessLqi(s.lqi),
+          'Link Quality Index (0–255). Measures how clean the radio channel is. Higher = better. Below 100 indicates interference or distance issues.'));
+        $body.append(makeRow('Neighbors',
+          s.neighborCount,
+          assessNeighbors(s.neighborCount),
+          'Number of direct Thread nodes in radio range. More neighbors = more routing redundancy. Only 1 means loss of that node isolates this device.'));
+        $body.append(makeRow('Detached count',
+          s.detachedCount,
+          assessDetached(s.detachedCount),
+          'Times this device completely lost the Thread network since last boot. Any value above 0 confirms real connectivity problems — consider moving device closer.'));
+        $body.append(makeRow('Parent changes',
+          s.parentChanges,
+          assessParentChanges(s.parentChanges),
+          'Times this device switched its parent router. Frequent changes indicate an unstable radio environment or the device is on the edge of coverage.'));
+        $body.append(makeRow('Attach attempts',
+          s.attachAttempts,
+          assessAttachAttempts(s.attachAttempts, s.detachedCount || 0),
+          'Total Thread join attempts since last boot. A high number relative to detach count means the device struggled to re-join each time it disconnected.'));
+        $overlay.show();
+      }
+
       function loadDevices() {
         var $list = $('#nr-mc-device-list').empty();
         $.getJSON('/matter-nodes/' + nodeId + '/registry')
@@ -36,55 +134,70 @@
               $list.html('<li style="color:#999;padding:4px 0">No commissioned devices</li>');
               return;
             }
+            // Stagger signal fetches: 300ms apart so they don't all hit the server simultaneously
+            var signalDelay = 0;
             entries.forEach(function (e) {
               var entry = e;
               var $row = $('<li style="display:flex;align-items:center;gap:6px;margin:4px 0;">');
-              var $dot = $('<span title="checking signal…" style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#ccc;flex-shrink:0;"></span>');
+              var $dot = $('<span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#ccc;flex-shrink:0;"></span>');
               var $input = $('<input type="text" style="flex:1;height:28px;border:1px solid #ccc;border-radius:3px;padding:0 6px;">').val(entry.label);
-              var $btn = $('<button type="button" class="red-ui-button" style="white-space:nowrap;">Rename</button>');
-              $btn.on('click', function () {
+              var $renameBtn = $('<button type="button" class="red-ui-button" style="white-space:nowrap;">Rename</button>');
+              var $detailBtn = $('<button type="button" class="red-ui-button" style="white-space:nowrap;">Details</button>');
+              $renameBtn.on('click', function () {
                 var newLabel = String($input.val()).trim();
                 if (!newLabel) return;
-                $btn.prop('disabled', true).text('…');
+                $renameBtn.prop('disabled', true).text('…');
                 $.ajax({
                   method: 'POST',
                   url: '/matter-nodes/' + nodeId + '/registry/' + entry.nodeId + '/rename',
                   contentType: 'application/json',
                   data: JSON.stringify({ label: newLabel })
                 })
-                  .done(function () { $btn.prop('disabled', false).text('Rename'); })
+                  .done(function () { $renameBtn.prop('disabled', false).text('Rename'); })
                   .fail(function (jqXHR) {
                     var msg = (jqXHR.responseJSON && jqXHR.responseJSON.error) || 'error';
-                    $btn.prop('disabled', false).text('Failed: ' + msg);
+                    $renameBtn.prop('disabled', false).text('Failed: ' + msg);
                   });
+              });
+              $detailBtn.on('click', function () {
+                showSignalOverlay(String($input.val()) || entry.label, signalCache[entry.nodeId]);
               });
               $row
                 .append($dot)
                 .append($('<span style="font-size:0.8em;color:#999;min-width:80px;">').text(entry.nodeId.slice(0, 4) + '…' + entry.nodeId.slice(-4)))
                 .append($input)
-                .append($btn);
+                .append($renameBtn)
+                .append($detailBtn);
               $list.append($row);
-              $.getJSON('/matter-nodes/' + nodeId + '/registry/' + entry.nodeId + '/signal')
-                .done(function (s) {
-                  var color = s.level === 'good' ? '#27ae60' : s.level === 'fair' ? '#f39c12' : s.level === 'poor' ? '#e74c3c' : '#aaa';
-                  var parts = [];
-                  if (s.rssi !== undefined) parts.push('RSSI: ' + s.rssi + ' dBm (radio signal strength to nearest neighbor; ≥-70 good, ≥-85 fair, <-85 poor)');
-                  if (s.lqi !== undefined) parts.push('LQI: ' + s.lqi + ' (link quality index 0–255; higher = cleaner signal)');
-                  if (s.neighborCount !== undefined) parts.push('Neighbors: ' + s.neighborCount + ' (direct Thread nodes in range; 1 = single point of failure)');
-                  if (s.detachedCount !== undefined) parts.push('Detached: ' + s.detachedCount + (s.detachedCount > 0 ? ' ⚠' : ' ✓') + ' (times lost from network since last boot; >0 means real connectivity problems)');
-                  if (s.parentChanges !== undefined) parts.push('Parent changes: ' + s.parentChanges + ' (times switched router parent; high = unstable mesh)');
-                  if (s.attachAttempts !== undefined) parts.push('Attach attempts: ' + s.attachAttempts + ' (total join attempts since last boot; high vs detached ratio = struggled to join)');
-                  var tip = s.type === 'Thread' ? (parts.length ? parts.join('\n') : 'Thread (no diagnostics available)') : 'no Thread diagnostics';
-                  $dot.css('background', color).attr('title', tip);
-                })
-                .fail(function () { $dot.css('background', '#aaa').attr('title', 'signal unavailable'); });
+              // Stagger: one signal request every 300ms, reads from cache so each is fast
+              (function($d, $row_dot, nodeIdVal) {
+                setTimeout(function () {
+                  $.getJSON('/matter-nodes/' + nodeId + '/registry/' + nodeIdVal + '/signal')
+                    .done(function (s) {
+                      signalCache[nodeIdVal] = s;
+                      var color = s.level === 'good' ? '#27ae60' : s.level === 'fair' ? '#f39c12' : s.level === 'poor' ? '#e74c3c' : '#aaa';
+                      $row_dot.css('background', color);
+                    })
+                    .fail(function () { $row_dot.css('background', '#aaa'); });
+                }, $d);
+              }(signalDelay, $dot, entry.nodeId));
+              signalDelay += 300;
             });
           })
           .fail(function () {
             $list.html('<li style="color:#999;padding:4px 0">Deploy the flow first to load devices</li>');
           });
       }
-      loadDevices();
+      // Only fetch devices (and signal data) when the list scrolls into view
+      var _devicesLoaded = false;
+      var _observer = new IntersectionObserver(function (entries) {
+        if (entries[0].isIntersecting && !_devicesLoaded) {
+          _devicesLoaded = true;
+          _observer.disconnect();
+          loadDevices();
+        }
+      }, { threshold: 0.1 });
+      _observer.observe(document.getElementById('nr-mc-device-list'));
     }
   });
 </script>

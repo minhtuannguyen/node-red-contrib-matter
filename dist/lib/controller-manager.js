@@ -352,8 +352,9 @@ class ControllerManager {
     }
     /**
      * Read Thread diagnostics from ThreadNetworkDiagnostics (cluster 0x0035, endpoint 0).
+     * Reads from the local subscription cache (get(false)) — no network round trip.
+     * Data is already populated by the active subscription session.
      * Color is based on min neighbor RSSI (best proxy for raw radio signal).
-     * All stability counters are included for the hover tooltip.
      */
     async readSignalStrength(nodeIdStr) {
         const node = await this.getOrConnectNode(nodeIdStr, false);
@@ -365,8 +366,9 @@ class ControllerManager {
         const readAttr = async (name) => {
             if (!threadClient.attributes[name])
                 return undefined;
+            // get(false) = read from local subscription cache, zero network I/O
             try {
-                return await threadClient.attributes[name].get(true);
+                return await threadClient.attributes[name].get(false);
             }
             catch {
                 return undefined;
