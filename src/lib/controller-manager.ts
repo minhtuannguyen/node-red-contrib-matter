@@ -406,6 +406,8 @@ export class ControllerManager {
     // always-on and sleepy/ICD (Thread) devices.
     const connectOptions: CommissioningControllerNodeOptions = {
       autoSubscribe: false,
+      subscribeMinIntervalFloorSeconds: 30,    // batch updates — reduces SDK storage writes on Pi
+      subscribeMaxIntervalCeilingSeconds: 120, // keepalive: device must report at least every 2 min
     };
 
     const node = await ctrl.connectNode(nodeId, connectOptions);
@@ -699,8 +701,6 @@ export class ControllerManager {
     // after commissioning reboot or reconnect. Retry once after a short delay before giving up.
     await node.subscribeAllAttributesAndEvents({
       ignoreInitialTriggers: true,
-      minIntervalFloorSeconds: 30,   // device sends at most every 30s → fewer SDK storage writes
-      maxIntervalCeilingSeconds: 120, // device must report at least every 2 min
       attributeChangedCallback: (data) => {
         const handlers = this.attrHandlers.get(nodeIdStr);
         if (!handlers?.size) return;
