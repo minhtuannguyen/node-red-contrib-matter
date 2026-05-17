@@ -1,5 +1,9 @@
 # node-red-contrib-matter
 
+[![npm](https://img.shields.io/npm/v/@minguyen68/node-red-contrib-matter.svg?style=flat-square)](https://www.npmjs.com/package/@minguyen68/node-red-contrib-matter)
+[![npm](https://img.shields.io/npm/dt/@minguyen68/node-red-contrib-matter.svg?style=flat-square)](https://www.npmjs.com/package/@minguyen68/node-red-contrib-matter)
+[![GitHub last commit](https://img.shields.io/github/last-commit/minhtuannguyen/node-red-contrib-matter.svg?style=flat-square)](https://github.com/minhtuannguyen/node-red-contrib-matter)
+
 ![Flow Example](pic/screenshot.png)
 
 A generic [Matter](https://csa-iot.org/all-solutions/matter/) protocol controller for [Node-RED](https://nodered.org/).  
@@ -32,6 +36,13 @@ Built on [matter.js](https://github.com/project-chip/matter.js) (`@project-chip/
 ---
 
 ## Installation
+
+### From npm
+
+```bash
+cd ~/.node-red
+npm install @minguyen68/node-red-contrib-matter
+```
 
 ### From GitHub
 
