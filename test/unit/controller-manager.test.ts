@@ -20,6 +20,15 @@ jest.mock("@matter/general", () => ({
       error: jest.fn(),
       debug: jest.fn(),
     }),
+    defaultLogLevel: 1,
+  },
+  LogLevel: {
+    DEBUG:  0,
+    INFO:   1,
+    NOTICE: 2,
+    WARN:   3,
+    ERROR:  4,
+    FATAL:  5,
   },
   // Used via dynamic require() inside _doStart()
   Environment: {
