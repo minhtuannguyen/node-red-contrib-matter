@@ -88,8 +88,9 @@ module.exports = function (RED: NodeRedAPI) {
 
     const storagePath = config.storagePath || `${process.env["HOME"]}/.node-red-matter`;
     const port = parseInt(config.port, 10) || 5540;
+    const logLevel = config.logLevel || "Info";
 
-    this.manager = ControllerManager.getInstance(storagePath, port);
+    this.manager = ControllerManager.getInstance(storagePath, port, logLevel);
 
     this.manager.start().then(() => {
       this.log(`Matter controller ready — storage: ${storagePath}`);

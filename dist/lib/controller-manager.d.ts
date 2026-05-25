@@ -95,6 +95,7 @@ export interface SubscriptionFilter {
 export declare class ControllerManager {
     private readonly storagePath;
     private readonly port;
+    private readonly logLevel;
     private controller?;
     private started;
     /** If start() is already in progress, all concurrent callers await this same promise. */
@@ -130,8 +131,9 @@ export declare class ControllerManager {
     private registry;
     private registryPath;
     private constructor();
-    static getInstance(storagePath: string, port: number): ControllerManager;
+    static getInstance(storagePath: string, port: number, logLevel?: string): ControllerManager;
     static removeInstance(storagePath: string): void;
+    private applyLogLevel;
     start(): Promise<void>;
     private _doStart;
     close(): Promise<void>;

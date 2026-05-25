@@ -112,6 +112,7 @@ const instances = new Map();
 class ControllerManager {
     storagePath;
     port;
+    logLevel;
     controller;
     started = false;
     /** If start() is already in progress, all concurrent callers await this same promise. */
@@ -146,19 +147,35 @@ class ControllerManager {
     /** Persisted registry of commissioned devices with their discovery data */
     registry = {};
     registryPath = "";
-    constructor(storagePath, port) {
+    constructor(storagePath, port, logLevel = "Info") {
         this.storagePath = storagePath;
         this.port = port;
+        this.logLevel = logLevel;
     }
     // ----------- Singleton access ------------------------------------------
-    static getInstance(storagePath, port) {
+    static getInstance(storagePath, port, logLevel = "Info") {
         if (!instances.has(storagePath)) {
-            instances.set(storagePath, new ControllerManager(storagePath, port));
+            instances.set(storagePath, new ControllerManager(storagePath, port, logLevel));
+        }
+        else {
+            // Apply log level even if instance already exists (e.g. after hot-redeploy)
+            instances.get(storagePath).applyLogLevel(logLevel);
         }
         return instances.get(storagePath);
     }
     static removeInstance(storagePath) {
         instances.delete(storagePath);
+    }
+    applyLogLevel(level) {
+        const map = {
+            Debug: general_1.LogLevel.DEBUG,
+            Info: general_1.LogLevel.INFO,
+            Notice: general_1.LogLevel.NOTICE,
+            Warn: general_1.LogLevel.WARN,
+            Error: general_1.LogLevel.ERROR,
+            Fatal: general_1.LogLevel.FATAL,
+        };
+        general_1.Logger.defaultLogLevel = map[level] ?? general_1.LogLevel.INFO;
     }
     // ----------- Lifecycle -------------------------------------------------
     async start() {
@@ -183,6 +200,10 @@ class ControllerManager {
         (0, node_fs_1.mkdirSync)((0, node_path_1.join)(this.storagePath, CONTROLLER_ID), { recursive: true });
         this.registryPath = (0, node_path_1.join)(this.storagePath, CONTROLLER_ID, "registry.json");
         this.loadRegistry();
+        // Apply log level before starting the controller so that all matter.js
+        // subsystems (CASE, mDNS, TLV, protocol handlers) respect the configured
+        // level from the first log call. This was previously a dead config option.
+        this.applyLogLevel(this.logLevel);
         // eslint-disable-next-line @typescript-eslint/no-require-imports
         const { Environment } = require("@matter/general");
         const env = Environment.default;

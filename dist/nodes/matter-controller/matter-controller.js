@@ -58,7 +58,8 @@ module.exports = function (RED) {
         RED.nodes.createNode(this, config);
         const storagePath = config.storagePath || `${process.env["HOME"]}/.node-red-matter`;
         const port = parseInt(config.port, 10) || 5540;
-        this.manager = controller_manager_js_1.ControllerManager.getInstance(storagePath, port);
+        const logLevel = config.logLevel || "Info";
+        this.manager = controller_manager_js_1.ControllerManager.getInstance(storagePath, port, logLevel);
         this.manager.start().then(() => {
             this.log(`Matter controller ready — storage: ${storagePath}`);
         }).catch((err) => {

@@ -15,7 +15,7 @@ import { join } from "node:path";
 import { CommissioningController } from "@project-chip/matter.js";
 import { NodeStates } from "@project-chip/matter.js/device";
 import type { CommissioningControllerNodeOptions, PairedNode } from "@project-chip/matter.js/device";
-import { Logger } from "@matter/general";
+import { Logger, LogLevel } from "@matter/general";
 import { ClusterId, EndpointNumber, ManualPairingCodeCodec, NodeId } from "@matter/types";
 
 const logger = Logger.get("ControllerManager");
@@ -261,19 +261,35 @@ export class ControllerManager {
   private constructor(
     private readonly storagePath: string,
     private readonly port: number,
+    private readonly logLevel: string = "Info",
   ) {}
 
   // ----------- Singleton access ------------------------------------------
 
-  static getInstance(storagePath: string, port: number): ControllerManager {
+  static getInstance(storagePath: string, port: number, logLevel = "Info"): ControllerManager {
     if (!instances.has(storagePath)) {
-      instances.set(storagePath, new ControllerManager(storagePath, port));
+      instances.set(storagePath, new ControllerManager(storagePath, port, logLevel));
+    } else {
+      // Apply log level even if instance already exists (e.g. after hot-redeploy)
+      instances.get(storagePath)!.applyLogLevel(logLevel);
     }
     return instances.get(storagePath)!;
   }
 
   static removeInstance(storagePath: string): void {
     instances.delete(storagePath);
+  }
+
+  private applyLogLevel(level: string): void {
+    const map: Record<string, LogLevel> = {
+      Debug:  LogLevel.DEBUG,
+      Info:   LogLevel.INFO,
+      Notice: LogLevel.NOTICE,
+      Warn:   LogLevel.WARN,
+      Error:  LogLevel.ERROR,
+      Fatal:  LogLevel.FATAL,
+    };
+    Logger.defaultLogLevel = map[level] ?? LogLevel.INFO;
   }
 
   // ----------- Lifecycle -------------------------------------------------
@@ -302,6 +318,11 @@ export class ControllerManager {
 
     this.registryPath = join(this.storagePath, CONTROLLER_ID, "registry.json");
     this.loadRegistry();
+
+    // Apply log level before starting the controller so that all matter.js
+    // subsystems (CASE, mDNS, TLV, protocol handlers) respect the configured
+    // level from the first log call. This was previously a dead config option.
+    this.applyLogLevel(this.logLevel);
 
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { Environment } = require("@matter/general") as typeof import("@matter/general");
