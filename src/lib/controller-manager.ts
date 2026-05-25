@@ -292,6 +292,30 @@ export class ControllerManager {
     Logger.defaultLogLevel = map[level] ?? LogLevel.INFO;
   }
 
+  /**
+   * Returns true if any attribute or event handler is registered for the node.
+   * Used to decide between a persistent cached connection (subscribed device)
+   * and a transient connect-use-disconnect pattern (command/read-only device).
+   */
+  private hasActiveHandlers(nodeIdStr: string): boolean {
+    return (
+      (this.attrHandlers.get(nodeIdStr)?.size ?? 0) > 0 ||
+      (this.eventHandlers.get(nodeIdStr)?.size ?? 0) > 0
+    );
+  }
+
+  /**
+   * If the node has no active handlers it was connected transiently just for
+   * this operation. Disconnect it now to free the CASE session and cluster
+   * client objects (~15 MB per device).
+   */
+  private async releaseIfTransient(nodeIdStr: string, node: PairedNode): Promise<void> {
+    if (!this.hasActiveHandlers(nodeIdStr)) {
+      this.connectedNodes.delete(nodeIdStr);
+      await node.disconnect().catch(() => {/* ignore disconnect errors */});
+    }
+  }
+
   // ----------- Lifecycle -------------------------------------------------
 
   async start(): Promise<void> {
@@ -487,25 +511,29 @@ export class ControllerManager {
     args: Record<string, unknown>,
   ): Promise<unknown> {
     const node = await this.getOrConnectNode(nodeIdStr, false);
-    const client = node
-      .getDeviceById(EndpointNumber(endpointId))
-      ?.getClusterClientById(ClusterId(clusterId));
+    try {
+      const client = node
+        .getDeviceById(EndpointNumber(endpointId))
+        ?.getClusterClientById(ClusterId(clusterId));
 
-    if (!client) {
-      throw new Error(
-        `Cluster 0x${clusterId.toString(16)} not found on endpoint ${endpointId} of node ${nodeIdStr}`,
-      );
-    }
-    if (typeof client.commands[commandName] !== "function") {
-      throw new Error(
-        `Command "${commandName}" not found in cluster 0x${clusterId.toString(16)}`,
-      );
-    }
+      if (!client) {
+        throw new Error(
+          `Cluster 0x${clusterId.toString(16)} not found on endpoint ${endpointId} of node ${nodeIdStr}`,
+        );
+      }
+      if (typeof client.commands[commandName] !== "function") {
+        throw new Error(
+          `Command "${commandName}" not found in cluster 0x${clusterId.toString(16)}`,
+        );
+      }
 
-    const hasArgs = Object.keys(args).length > 0;
-    return await (client.commands[commandName] as (a?: Record<string, unknown>) => Promise<unknown>)(
-      hasArgs ? args : undefined,
-    );
+      const hasArgs = Object.keys(args).length > 0;
+      return await (client.commands[commandName] as (a?: Record<string, unknown>) => Promise<unknown>)(
+        hasArgs ? args : undefined,
+      );
+    } finally {
+      await this.releaseIfTransient(nodeIdStr, node);
+    }
   }
 
   async readAttribute(
@@ -515,23 +543,27 @@ export class ControllerManager {
     attributeName: string,
   ): Promise<unknown> {
     const node = await this.getOrConnectNode(nodeIdStr, false);
-    const client = node
-      .getDeviceById(EndpointNumber(endpointId))
-      ?.getClusterClientById(ClusterId(clusterId));
+    try {
+      const client = node
+        .getDeviceById(EndpointNumber(endpointId))
+        ?.getClusterClientById(ClusterId(clusterId));
 
-    if (!client) {
-      throw new Error(
-        `Cluster 0x${clusterId.toString(16)} not found on endpoint ${endpointId} of node ${nodeIdStr}`,
-      );
+      if (!client) {
+        throw new Error(
+          `Cluster 0x${clusterId.toString(16)} not found on endpoint ${endpointId} of node ${nodeIdStr}`,
+        );
+      }
+      const attrClient = client.attributes[attributeName];
+      if (!attrClient) {
+        throw new Error(
+          `Attribute "${attributeName}" not found in cluster 0x${clusterId.toString(16)}`,
+        );
+      }
+      // Pass `true` to always fetch fresh value from the device.
+      return await attrClient.get(true);
+    } finally {
+      await this.releaseIfTransient(nodeIdStr, node);
     }
-    const attrClient = client.attributes[attributeName];
-    if (!attrClient) {
-      throw new Error(
-        `Attribute "${attributeName}" not found in cluster 0x${clusterId.toString(16)}`,
-      );
-    }
-    // Pass `true` to always fetch fresh value from the device.
-    return await attrClient.get(true);
   }
 
   /**
@@ -628,7 +660,11 @@ export class ControllerManager {
    */
   async discoverDevice(nodeIdStr: string): Promise<DeviceDescription> {
     const node = await this.getOrConnectNode(nodeIdStr, false);
-    return this.buildDiscovery(nodeIdStr, node);
+    try {
+      return this.buildDiscovery(nodeIdStr, node);
+    } finally {
+      await this.releaseIfTransient(nodeIdStr, node);
+    }
   }
 
   private buildDiscovery(nodeIdStr: string, node: PairedNode): DeviceDescription {

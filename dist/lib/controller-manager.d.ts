@@ -134,6 +134,18 @@ export declare class ControllerManager {
     static getInstance(storagePath: string, port: number, logLevel?: string): ControllerManager;
     static removeInstance(storagePath: string): void;
     private applyLogLevel;
+    /**
+     * Returns true if any attribute or event handler is registered for the node.
+     * Used to decide between a persistent cached connection (subscribed device)
+     * and a transient connect-use-disconnect pattern (command/read-only device).
+     */
+    private hasActiveHandlers;
+    /**
+     * If the node has no active handlers it was connected transiently just for
+     * this operation. Disconnect it now to free the CASE session and cluster
+     * client objects (~15 MB per device).
+     */
+    private releaseIfTransient;
     start(): Promise<void>;
     private _doStart;
     close(): Promise<void>;
