@@ -4,6 +4,7 @@ import type {
   AttributeChangeHandler,
   EventTriggeredEvent,
   EventTriggeredHandler,
+  SubscriptionFilter,
 } from "../../lib/controller-manager.js";
 import type { NodeRedAPI, NodeRedDef, NodeRedMessage, NodeRedNode } from "../../types/node-red.js";
 
@@ -128,9 +129,19 @@ module.exports = function (RED: NodeRedAPI) {
     // Register handlers — this also triggers connection + subscription lazily
     this.status({ fill: "yellow", shape: "dot", text: "connecting…" });
 
+    // Build subscription filters from the node's config. When a clusterId is
+    // set, the controller uses selective per-cluster subscription instead of
+    // subscribing to every attribute on the device, which saves significant RAM.
+    const attrFilter: SubscriptionFilter | undefined = filterCluster !== undefined
+      ? { endpointId: filterEndpoint, clusterId: filterCluster, attributeName: filterAttrName }
+      : undefined;
+    const evtFilter: SubscriptionFilter | undefined = filterCluster !== undefined
+      ? { endpointId: filterEndpoint, clusterId: filterCluster, eventName: filterEventName }
+      : undefined;
+
     controllerNode.manager
-      .addAttributeHandler(nodeId, attrHandler)
-      .then(() => controllerNode.manager.addEventHandler(nodeId, evtHandler))
+      .addAttributeHandler(nodeId, attrHandler, attrFilter)
+      .then(() => controllerNode.manager.addEventHandler(nodeId, evtHandler, evtFilter))
       .then(async () => {
         this.status({ fill: "green", shape: "dot", text: `subscribed — node ${nodeId}` });
 

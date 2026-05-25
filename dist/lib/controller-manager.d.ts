@@ -77,6 +77,21 @@ export interface EventTriggeredEvent {
 }
 export type AttributeChangeHandler = (event: AttributeChangedEvent) => void;
 export type EventTriggeredHandler = (event: EventTriggeredEvent) => void;
+/**
+ * Optional filter passed when registering a subscription handler.
+ * When `clusterId` is provided the controller uses a targeted per-cluster
+ * subscription instead of `subscribeAllAttributesAndEvents`, which avoids
+ * caching every attribute on the device and reduces memory significantly.
+ */
+export interface SubscriptionFilter {
+    endpointId?: number;
+    /** If set, only this cluster is subscribed (selective mode). */
+    clusterId?: number;
+    /** Further narrow to a single attribute within the cluster. */
+    attributeName?: string;
+    /** Further narrow to a single event within the cluster. */
+    eventName?: string;
+}
 export declare class ControllerManager {
     private readonly storagePath;
     private readonly port;
@@ -90,6 +105,15 @@ export declare class ControllerManager {
     private readonly attrHandlers;
     /** nodeId -> event handlers */
     private readonly eventHandlers;
+    /** nodeId -> (handler -> filter) — only populated when the handler supplied a clusterId filter */
+    private readonly attrHandlerFilters;
+    private readonly eventHandlerFilters;
+    /**
+     * Cleanup functions for per-attribute/per-event listeners added during
+     * selective subscription. Invoked before re-subscribing on reconnect and
+     * on close/removeDevice so listeners don't accumulate.
+     */
+    private readonly selectiveCleanupFns;
     /**
      * Per-node subscription lock. If subscribeAllAttributesAndEvents() is already
      * in progress for a node, concurrent callers await the same promise instead of
@@ -162,19 +186,55 @@ export declare class ControllerManager {
      * Register a callback that fires when any attribute on `nodeIdStr` changes.
      * Automatically enables subscription for that node the first time a handler
      * is registered.
+     *
+     * Supply `filter` with at least a `clusterId` to opt into selective
+     * subscription (only that cluster is subscribed, saving memory).
+     * If any handler has no clusterId filter the node falls back to a full
+     * `subscribeAllAttributesAndEvents` for that device.
      */
-    addAttributeHandler(nodeIdStr: string, handler: AttributeChangeHandler): Promise<void>;
+    addAttributeHandler(nodeIdStr: string, handler: AttributeChangeHandler, filter?: SubscriptionFilter): Promise<void>;
     removeAttributeHandler(nodeIdStr: string, handler: AttributeChangeHandler): void;
     /**
      * Register a callback that fires when any event is triggered on `nodeIdStr`.
      * Automatically enables subscription for that node the first time a handler
      * is registered.
+     *
+     * Supply `filter` with at least a `clusterId` to opt into selective
+     * subscription.
      */
-    addEventHandler(nodeIdStr: string, handler: EventTriggeredHandler): Promise<void>;
+    addEventHandler(nodeIdStr: string, handler: EventTriggeredHandler, filter?: SubscriptionFilter): Promise<void>;
     removeEventHandler(nodeIdStr: string, handler: EventTriggeredHandler): void;
     private requireController;
     private ensureSubscribed;
     private activateSubscriptions;
+    /**
+     * Returns true when every registered handler for `nodeIdStr` has a
+     * clusterId filter, meaning we can subscribe only to those specific
+     * clusters instead of the full device.
+     */
+    private canUseSelectiveSubscription;
+    /**
+     * Full subscription — subscribes to every attribute and event on the device.
+     * Used when at least one handler has no clusterId filter.
+     */
+    private activateFullSubscription;
+    /**
+     * Selective subscription — subscribes only to the specific clusters (and
+     * optionally attributes/events) that have registered handlers.
+     *
+     * Uses per-attribute `AttributeClientObj.addListener` + `.subscribe()` so
+     * matter.js only caches the requested attributes, not the full device state.
+     * This can reduce per-device memory by 10–20 MB when only a handful of
+     * attributes are monitored.
+     */
+    private activateSelectiveSubscriptions;
+    /**
+     * Attach the stateChanged listener that re-subscribes on reconnect.
+     * Extracted so both full and selective subscription paths share the same logic.
+     */
+    private setupStateHandler;
+    private trackSelectiveCleanup;
+    private runSelectiveCleanups;
     /**
      * Returns the persisted registry of commissioned devices with their discovery data.
      * Used by the Node-RED admin UI to populate cascading dropdowns.

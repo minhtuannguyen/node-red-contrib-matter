@@ -122,6 +122,15 @@ class ControllerManager {
     attrHandlers = new Map();
     /** nodeId -> event handlers */
     eventHandlers = new Map();
+    /** nodeId -> (handler -> filter) — only populated when the handler supplied a clusterId filter */
+    attrHandlerFilters = new Map();
+    eventHandlerFilters = new Map();
+    /**
+     * Cleanup functions for per-attribute/per-event listeners added during
+     * selective subscription. Invoked before re-subscribing on reconnect and
+     * on close/removeDevice so listeners don't accumulate.
+     */
+    selectiveCleanupFns = new Map();
     /**
      * Per-node subscription lock. If subscribeAllAttributesAndEvents() is already
      * in progress for a node, concurrent callers await the same promise instead of
@@ -202,11 +211,15 @@ class ControllerManager {
             const h = this.stateHandlers.get(nodeIdStr);
             if (h)
                 entry.node.events.stateChanged.off(h);
+            this.runSelectiveCleanups(nodeIdStr);
         }
         this.stateHandlers.clear();
         this.connectedNodes.clear();
         this.attrHandlers.clear();
         this.eventHandlers.clear();
+        this.attrHandlerFilters.clear();
+        this.eventHandlerFilters.clear();
+        this.selectiveCleanupFns.clear();
         await this.controller?.close();
         this.started = false;
         ControllerManager.removeInstance(this.storagePath);
@@ -452,9 +465,20 @@ class ControllerManager {
      * Register a callback that fires when any attribute on `nodeIdStr` changes.
      * Automatically enables subscription for that node the first time a handler
      * is registered.
+     *
+     * Supply `filter` with at least a `clusterId` to opt into selective
+     * subscription (only that cluster is subscribed, saving memory).
+     * If any handler has no clusterId filter the node falls back to a full
+     * `subscribeAllAttributesAndEvents` for that device.
      */
-    async addAttributeHandler(nodeIdStr, handler) {
+    async addAttributeHandler(nodeIdStr, handler, filter) {
         this.getOrCreateHandlerSet(this.attrHandlers, nodeIdStr).add(handler);
+        if (filter?.clusterId !== undefined) {
+            if (!this.attrHandlerFilters.has(nodeIdStr)) {
+                this.attrHandlerFilters.set(nodeIdStr, new Map());
+            }
+            this.attrHandlerFilters.get(nodeIdStr).set(handler, filter);
+        }
         await this.ensureSubscribed(nodeIdStr);
     }
     removeAttributeHandler(nodeIdStr, handler) {
@@ -462,14 +486,27 @@ class ControllerManager {
         set?.delete(handler);
         if (set?.size === 0)
             this.attrHandlers.delete(nodeIdStr);
+        const filters = this.attrHandlerFilters.get(nodeIdStr);
+        filters?.delete(handler);
+        if (filters?.size === 0)
+            this.attrHandlerFilters.delete(nodeIdStr);
     }
     /**
      * Register a callback that fires when any event is triggered on `nodeIdStr`.
      * Automatically enables subscription for that node the first time a handler
      * is registered.
+     *
+     * Supply `filter` with at least a `clusterId` to opt into selective
+     * subscription.
      */
-    async addEventHandler(nodeIdStr, handler) {
+    async addEventHandler(nodeIdStr, handler, filter) {
         this.getOrCreateHandlerSet(this.eventHandlers, nodeIdStr).add(handler);
+        if (filter?.clusterId !== undefined) {
+            if (!this.eventHandlerFilters.has(nodeIdStr)) {
+                this.eventHandlerFilters.set(nodeIdStr, new Map());
+            }
+            this.eventHandlerFilters.get(nodeIdStr).set(handler, filter);
+        }
         await this.ensureSubscribed(nodeIdStr);
     }
     removeEventHandler(nodeIdStr, handler) {
@@ -477,6 +514,10 @@ class ControllerManager {
         set?.delete(handler);
         if (set?.size === 0)
             this.eventHandlers.delete(nodeIdStr);
+        const filters = this.eventHandlerFilters.get(nodeIdStr);
+        filters?.delete(handler);
+        if (filters?.size === 0)
+            this.eventHandlerFilters.delete(nodeIdStr);
     }
     // ----------- Private helpers -------------------------------------------
     requireController() {
@@ -510,20 +551,40 @@ class ControllerManager {
         return work;
     }
     async activateSubscriptions(nodeIdStr, node) {
-        // Pass callbacks directly — node.events.attributeChanged/eventTriggered are only
-        // emitted by the internal autoSubscribe path, NOT when calling subscribeAllAttributesAndEvents
-        // explicitly. Passing callbacks here is the correct way to receive updates.
-        //
-        // Devices can be slow to accept subscriptions right after (re)connecting — e.g. immediately
-        // after commissioning reboot or reconnect. Retry once after a short delay before giving up.
+        if (this.canUseSelectiveSubscription(nodeIdStr)) {
+            await this.activateSelectiveSubscriptions(nodeIdStr, node);
+        }
+        else {
+            await this.activateFullSubscription(nodeIdStr, node);
+        }
+    }
+    /**
+     * Returns true when every registered handler for `nodeIdStr` has a
+     * clusterId filter, meaning we can subscribe only to those specific
+     * clusters instead of the full device.
+     */
+    canUseSelectiveSubscription(nodeIdStr) {
+        const attrHandlers = this.attrHandlers.get(nodeIdStr);
+        const evtHandlers = this.eventHandlers.get(nodeIdStr);
+        const attrFilters = this.attrHandlerFilters.get(nodeIdStr);
+        const evtFilters = this.eventHandlerFilters.get(nodeIdStr);
+        const attrOk = !attrHandlers?.size ||
+            [...attrHandlers].every(h => attrFilters?.get(h)?.clusterId !== undefined);
+        const evtOk = !evtHandlers?.size ||
+            [...evtHandlers].every(h => evtFilters?.get(h)?.clusterId !== undefined);
+        return attrOk && evtOk;
+    }
+    /**
+     * Full subscription — subscribes to every attribute and event on the device.
+     * Used when at least one handler has no clusterId filter.
+     */
+    async activateFullSubscription(nodeIdStr, node) {
         await node.subscribeAllAttributesAndEvents({
             ignoreInitialTriggers: true,
             attributeChangedCallback: (data) => {
                 const handlers = this.attrHandlers.get(nodeIdStr);
                 if (!handlers?.size)
                     return;
-                // Use ISO string — string primitive avoids a heap-allocated Date object
-                // on every attribute change (reduces GC pressure on Pi).
                 const event = {
                     nodeId: nodeIdStr,
                     endpointId: data.path.endpointId,
@@ -561,22 +622,148 @@ class ControllerManager {
                 }
             },
         });
-        // -------------------------------------------------------------------------
-        // Re-subscription after device reconnect
-        // -------------------------------------------------------------------------
-        // subscribeAllAttributesAndEvents() establishes a one-shot subscription
-        // session with the device. If the device goes offline (Thread border router
-        // loses the device, Wi-Fi drop, power cycle, etc.) the session terminates
-        // silently — matter.js reconnects the CASE session automatically when the
-        // device reappears, but it does NOT re-subscribe.
-        //
-        // We listen to PairedNode.events.stateChanged. On Disconnected/Reconnecting
-        // we mark subscribed=false. On Connected (only after a prior disconnection)
-        // we call ensureSubscribed() to re-issue subscribeAllAttributesAndEvents.
-        //
-        // wasDisconnected guards against re-subscribing on the very first Connected
-        // event, which fires during connectNode() before this listener is registered.
-        //
+        this.setupStateHandler(nodeIdStr, node);
+        logger.info(`Subscribed to all attributes and events for node ${nodeIdStr}`);
+    }
+    /**
+     * Selective subscription — subscribes only to the specific clusters (and
+     * optionally attributes/events) that have registered handlers.
+     *
+     * Uses per-attribute `AttributeClientObj.addListener` + `.subscribe()` so
+     * matter.js only caches the requested attributes, not the full device state.
+     * This can reduce per-device memory by 10–20 MB when only a handful of
+     * attributes are monitored.
+     */
+    async activateSelectiveSubscriptions(nodeIdStr, node) {
+        // Remove any listeners from a previous subscription cycle (reconnect) so
+        // they don't accumulate on the persistent cluster client objects.
+        this.runSelectiveCleanups(nodeIdStr);
+        // Collect the unique (endpointId?, clusterId, attributeName?) paths for
+        // attributes and (endpointId?, clusterId, eventName?) paths for events.
+        const attrPaths = new Map();
+        const evtPaths = new Map();
+        for (const filter of (this.attrHandlerFilters.get(nodeIdStr)?.values() ?? [])) {
+            const key = `${filter.endpointId ?? '*'}/${filter.clusterId}/${filter.attributeName ?? '*'}`;
+            if (!attrPaths.has(key)) {
+                attrPaths.set(key, { endpointId: filter.endpointId, clusterId: filter.clusterId, attributeName: filter.attributeName });
+            }
+        }
+        for (const filter of (this.eventHandlerFilters.get(nodeIdStr)?.values() ?? [])) {
+            const key = `${filter.endpointId ?? '*'}/${filter.clusterId}/${filter.eventName ?? '*'}`;
+            if (!evtPaths.has(key)) {
+                evtPaths.set(key, { endpointId: filter.endpointId, clusterId: filter.clusterId, eventName: filter.eventName });
+            }
+        }
+        const rootEndpoint = node.getRootEndpoint();
+        const allEndpoints = [
+            ...(rootEndpoint ? [rootEndpoint.number] : []),
+            ...node.getDevices().map(d => d.number),
+        ];
+        const isNamed = (k) => isNaN(Number(k));
+        // -- Attribute subscriptions -------------------------------------------
+        for (const { endpointId, clusterId, attributeName } of attrPaths.values()) {
+            const endpoints = endpointId !== undefined ? [endpointId] : allEndpoints;
+            for (const ep of endpoints) {
+                const client = node.getDeviceById((0, types_1.EndpointNumber)(ep))?.getClusterClientById((0, types_1.ClusterId)(clusterId));
+                if (!client)
+                    continue;
+                const attrNames = attributeName
+                    ? [attributeName]
+                    : Object.keys(client.attributes).filter(isNamed);
+                for (const name of attrNames) {
+                    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                    const attr = client.attributes[name];
+                    if (!attr || typeof attr.addListener !== 'function')
+                        continue;
+                    const listener = (value) => {
+                        const handlers = this.attrHandlers.get(nodeIdStr);
+                        if (!handlers?.size)
+                            return;
+                        const event = {
+                            nodeId: nodeIdStr,
+                            endpointId: ep,
+                            clusterId,
+                            clusterName: CLUSTER_NAMES[clusterId] ?? `0x${clusterId.toString(16).toUpperCase().padStart(4, '0')}`,
+                            attributeName: name,
+                            value,
+                            timestamp: new Date().toISOString(),
+                        };
+                        for (const h of handlers) {
+                            try {
+                                h(event);
+                            }
+                            catch { /* keep other handlers running */ }
+                        }
+                    };
+                    attr.addListener(listener);
+                    this.trackSelectiveCleanup(nodeIdStr, () => attr.removeListener(listener));
+                    try {
+                        await attr.subscribe(30, 120);
+                    }
+                    catch (e) {
+                        logger.warn(`Selective attr subscribe failed for ${name} on cluster 0x${clusterId.toString(16)} ep ${ep} node ${nodeIdStr}: ${e}`);
+                    }
+                }
+            }
+        }
+        // -- Event subscriptions -----------------------------------------------
+        for (const { endpointId, clusterId, eventName } of evtPaths.values()) {
+            const endpoints = endpointId !== undefined ? [endpointId] : allEndpoints;
+            for (const ep of endpoints) {
+                const client = node.getDeviceById((0, types_1.EndpointNumber)(ep))?.getClusterClientById((0, types_1.ClusterId)(clusterId));
+                if (!client?.events)
+                    continue;
+                const evtNames = eventName
+                    ? [eventName]
+                    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                    : Object.keys(client.events).filter(isNamed);
+                for (const name of evtNames) {
+                    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                    const evt = client.events[name];
+                    if (!evt || typeof evt.addListener !== 'function')
+                        continue;
+                    const listener = (data) => {
+                        const handlers = this.eventHandlers.get(nodeIdStr);
+                        if (!handlers?.size)
+                            return;
+                        const event = {
+                            nodeId: nodeIdStr,
+                            endpointId: ep,
+                            clusterId,
+                            clusterName: CLUSTER_NAMES[clusterId] ?? `0x${clusterId.toString(16).toUpperCase().padStart(4, '0')}`,
+                            eventName: name,
+                            // Individual event listener receives a single DecodedEventData;
+                            // wrap in array to match the EventTriggeredEvent interface.
+                            events: [data],
+                            timestamp: new Date().toISOString(),
+                        };
+                        for (const h of handlers) {
+                            try {
+                                h(event);
+                            }
+                            catch { /* keep other handlers running */ }
+                        }
+                    };
+                    evt.addListener(listener);
+                    this.trackSelectiveCleanup(nodeIdStr, () => evt.removeListener(listener));
+                    try {
+                        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                        await evt.subscribe(30, 120);
+                    }
+                    catch (e) {
+                        logger.warn(`Selective event subscribe failed for ${name} on cluster 0x${clusterId.toString(16)} ep ${ep} node ${nodeIdStr}: ${e}`);
+                    }
+                }
+            }
+        }
+        this.setupStateHandler(nodeIdStr, node);
+        logger.info(`Selectively subscribed to ${attrPaths.size} attribute path(s) and ${evtPaths.size} event path(s) for node ${nodeIdStr}`);
+    }
+    /**
+     * Attach the stateChanged listener that re-subscribes on reconnect.
+     * Extracted so both full and selective subscription paths share the same logic.
+     */
+    setupStateHandler(nodeIdStr, node) {
         // Remove any previous listener first — activateSubscriptions may be called
         // again on each reconnect cycle.
         const prevStateHandler = this.stateHandlers.get(nodeIdStr);
@@ -608,7 +795,23 @@ class ControllerManager {
         };
         node.events.stateChanged.on(stateHandler);
         this.stateHandlers.set(nodeIdStr, stateHandler);
-        logger.info(`Subscribed to all attributes and events for node ${nodeIdStr}`);
+    }
+    trackSelectiveCleanup(nodeIdStr, fn) {
+        const arr = this.selectiveCleanupFns.get(nodeIdStr) ?? [];
+        arr.push(fn);
+        this.selectiveCleanupFns.set(nodeIdStr, arr);
+    }
+    runSelectiveCleanups(nodeIdStr) {
+        const arr = this.selectiveCleanupFns.get(nodeIdStr);
+        if (!arr)
+            return;
+        for (const fn of arr) {
+            try {
+                fn();
+            }
+            catch { /* ignore */ }
+        }
+        this.selectiveCleanupFns.delete(nodeIdStr);
     }
     // ----------- Device registry -------------------------------------------
     /**
@@ -639,8 +842,11 @@ class ControllerManager {
         }
         this.stateHandlers.delete(nodeIdStr);
         this.connectedNodes.delete(nodeIdStr);
+        this.runSelectiveCleanups(nodeIdStr);
         this.attrHandlers.delete(nodeIdStr);
         this.eventHandlers.delete(nodeIdStr);
+        this.attrHandlerFilters.delete(nodeIdStr);
+        this.eventHandlerFilters.delete(nodeIdStr);
         // tryDecommissioning = !force: properly removes the fabric entry on the
         // device when reachable; falls back to local-only removal on error.
         await ctrl.removeNode(nodeId, !force);
