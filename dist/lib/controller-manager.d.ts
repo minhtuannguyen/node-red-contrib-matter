@@ -106,15 +106,9 @@ export declare class ControllerManager {
     private readonly attrHandlers;
     /** nodeId -> event handlers */
     private readonly eventHandlers;
-    /** nodeId -> (handler -> filter) — only populated when the handler supplied a clusterId filter */
+    /** nodeId -> (handler -> filter) — used for callback-level dispatch filtering */
     private readonly attrHandlerFilters;
     private readonly eventHandlerFilters;
-    /**
-     * Cleanup functions for per-attribute/per-event listeners added during
-     * selective subscription. Invoked before re-subscribing on reconnect and
-     * on close/removeDevice so listeners don't accumulate.
-     */
-    private readonly selectiveCleanupFns;
     /**
      * Per-node subscription lock. If subscribeAllAttributesAndEvents() is already
      * in progress for a node, concurrent callers await the same promise instead of
@@ -222,33 +216,20 @@ export declare class ControllerManager {
     private ensureSubscribed;
     private activateSubscriptions;
     /**
-     * Returns true when every registered handler for `nodeIdStr` has a
-     * clusterId filter, meaning we can subscribe only to those specific
-     * clusters instead of the full device.
-     */
-    private canUseSelectiveSubscription;
-    /**
-     * Full subscription — subscribes to every attribute and event on the device.
-     * Used when at least one handler has no clusterId filter.
+     * Subscribes to all attributes and events on the device via
+     * `subscribeAllAttributesAndEvents` — the only matter.js v0.16 API that
+     * reliably delivers ongoing device-pushed reports.
+     *
+     * Handlers registered with a SubscriptionFilter are dispatched only when
+     * the incoming event matches their filter (clusterId / endpointId /
+     * attributeName / eventName). Handlers without a filter receive everything.
      */
     private activateFullSubscription;
-    /**
-     * Selective subscription — subscribes only to the specific clusters (and
-     * optionally attributes/events) that have registered handlers.
-     *
-     * Uses per-attribute `AttributeClientObj.addListener` + `.subscribe()` so
-     * matter.js only caches the requested attributes, not the full device state.
-     * This can reduce per-device memory by 10–20 MB when only a handful of
-     * attributes are monitored.
-     */
-    private activateSelectiveSubscriptions;
     /**
      * Attach the stateChanged listener that re-subscribes on reconnect.
      * Extracted so both full and selective subscription paths share the same logic.
      */
     private setupStateHandler;
-    private trackSelectiveCleanup;
-    private runSelectiveCleanups;
     /**
      * Returns the persisted registry of commissioned devices with their discovery data.
      * Used by the Node-RED admin UI to populate cascading dropdowns.
