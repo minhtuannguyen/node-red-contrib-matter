@@ -30,9 +30,13 @@ jest.mock("@matter/general", () => ({
     ERROR:  4,
     FATAL:  5,
   },
+  StorageService: class StorageService {},
   // Used via dynamic require() inside _doStart()
   Environment: {
-    default: { vars: { set: jest.fn() } },
+    default: {
+      vars: { set: jest.fn() },
+      get: jest.fn(() => ({ configuredDriver: undefined })),
+    },
   },
 }));
 
@@ -510,6 +514,7 @@ describe("saveRegistry() via removeDevice()", () => {
 
     const m = ControllerManager.getInstance(STORAGE_A, 5540);
     await m.start();
+    mockWriteFile.mockClear(); // isolate: only captures the removeDevice() write
     await m.removeDevice("12345", true);
 
     expect(mockWriteFile).toHaveBeenCalled();

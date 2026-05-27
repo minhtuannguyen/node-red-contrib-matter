@@ -349,9 +349,21 @@ export class ControllerManager {
     this.applyLogLevel(this.logLevel);
 
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { Environment } = require("@matter/general") as typeof import("@matter/general");
+    const { Environment, StorageService } = require("@matter/general") as typeof import("@matter/general");
     const env = Environment.default;
     env.vars.set("storage.path", this.storagePath);
+
+    // Switch to SQLite storage on Node.js 22+ (node:sqlite is unavailable on 20.x).
+    // Boot.init fires at import time so env.vars is too late; we set configuredDriver
+    // directly on the already-bootstrapped StorageService.  When configuredDriver
+    // differs from the detected on-disk driver, StorageService auto-migrates all
+    // existing flat-file data into one SQLite database (WAL + synchronous=NORMAL).
+    // This consolidates thousands of attribute-cache files and dramatically reduces
+    // SD-card write pressure beyond the built-in 20-minute buffer added in 0.17.0.
+    const nodeMajor = parseInt(process.versions.node.split(".")[0], 10);
+    if (nodeMajor >= 22) {
+      env.get(StorageService).configuredDriver = "sqlite";
+    }
 
     this.controller = new CommissioningController({
       environment: {
@@ -367,6 +379,11 @@ export class ControllerManager {
 
     await this.controller.start();
     this.started = true;
+    // On Node.js 22+, StorageService renames the entire node-red-matter/ directory
+    // during SQLite migration, which moves registry.json into the backup.  Write
+    // the in-memory registry back to the new location so it survives a restart
+    // even if no commissioning/decommission event calls saveRegistry() first.
+    if (nodeMajor >= 22) this.saveRegistry();
     logger.info(`Matter controller started — storage: ${this.storagePath}`);
   }
 
