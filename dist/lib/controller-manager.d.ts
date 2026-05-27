@@ -231,6 +231,16 @@ export declare class ControllerManager {
      */
     private setupStateHandler;
     /**
+     * Deletes storage cache files that belong to nodeIds which are no longer in
+     * the registry (decommissioned devices). Called once at startup before
+     * matter.js loads the cache into memory, so stale data never occupies heap.
+     *
+     * Safe: only removes files matching `nodes.{nodeId}.*` where nodeId is not
+     * in the active registry. Commissioning data (fabrics.*, sessions.*, etc.)
+     * is left untouched.
+     */
+    private cleanStaleNodeCache;
+    /**
      * Returns the persisted registry of commissioned devices with their discovery data.
      * Used by the Node-RED admin UI to populate cascading dropdowns.
      */

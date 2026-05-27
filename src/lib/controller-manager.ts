@@ -9,7 +9,7 @@
 import "@matter/nodejs";
 
 import { mkdirSync, readFileSync } from "node:fs";
-import { writeFile } from "node:fs/promises";
+import { readdir, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { CommissioningController } from "@project-chip/matter.js";
@@ -336,6 +336,12 @@ export class ControllerManager {
 
     this.registryPath = join(this.storagePath, CONTROLLER_ID, "registry.json");
     this.loadRegistry();
+
+    // Remove storage files for decommissioned nodes before matter.js loads the
+    // cache into memory. Safe: only deletes endpoint attribute-value files for
+    // nodeIds that are no longer in the registry. Commissioning/fabric data
+    // (fabrics.*, sessions.*) is never touched.
+    await this.cleanStaleNodeCache();
 
     // Apply log level before starting the controller so that all matter.js
     // subsystems (CASE, mDNS, TLV, protocol handlers) respect the configured
@@ -903,6 +909,49 @@ export class ControllerManager {
     };
     node.events.stateChanged.on(stateHandler);
     this.stateHandlers.set(nodeIdStr, stateHandler);
+  }
+
+  // ----------- Device registry -------------------------------------------
+
+  /**
+   * Deletes storage cache files that belong to nodeIds which are no longer in
+   * the registry (decommissioned devices). Called once at startup before
+   * matter.js loads the cache into memory, so stale data never occupies heap.
+   *
+   * Safe: only removes files matching `nodes.{nodeId}.*` where nodeId is not
+   * in the active registry. Commissioning data (fabrics.*, sessions.*, etc.)
+   * is left untouched.
+   */
+  private async cleanStaleNodeCache(): Promise<void> {
+    const storageDir = join(this.storagePath, "node-red-matter");
+    let files: string[];
+    try {
+      files = await readdir(storageDir);
+    } catch {
+      return; // directory doesn't exist yet — nothing to clean
+    }
+
+    const activeNodeIds = new Set(Object.keys(this.registry));
+    const toDelete: string[] = [];
+    const staleIds = new Set<string>();
+
+    for (const file of files) {
+      // Match attribute/state files for a specific node: nodes.{nodeId}.*
+      const m = file.match(/^nodes\.(\d+)\./);
+      if (m && !activeNodeIds.has(m[1])) {
+        toDelete.push(file);
+        staleIds.add(m[1]);
+      }
+    }
+
+    if (toDelete.length === 0) return;
+
+    await Promise.all(
+      toDelete.map(f => unlink(join(storageDir, f)).catch(() => { /* ignore race-condition deletes */ })),
+    );
+    logger.info(
+      `Cleaned ${toDelete.length} stale cache file(s) for ${staleIds.size} decommissioned node(s): ${[...staleIds].join(", ")}`,
+    );
   }
 
   // ----------- Device registry -------------------------------------------
