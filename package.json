@@ -1,6 +1,6 @@
 {
   "name": "@minguyen68/node-red-contrib-matter",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Generic Matter protocol controller for Node-RED — commission and control any Matter device (locks, lights, sensors) over IP/Thread",
   "keywords": [
     "node-red",
