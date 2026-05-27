@@ -39,10 +39,10 @@
     }
   },
   "dependencies": {
-    "@matter/general": "^0.16.11",
-    "@matter/nodejs": "^0.16.11",
-    "@matter/types": "^0.16.11",
-    "@project-chip/matter.js": "^0.16.11",
+    "@matter/general": "^0.17.0",
+    "@matter/nodejs": "^0.17.0",
+    "@matter/types": "^0.17.0",
+    "@project-chip/matter.js": "^0.17.0",
     "typescript": "^5.4.0"
   },
   "devDependencies": {
