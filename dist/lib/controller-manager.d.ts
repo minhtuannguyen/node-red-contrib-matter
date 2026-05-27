@@ -2,11 +2,10 @@
  * ControllerManager — wraps the matter.js CommissioningController in a
  * Node-RED-friendly singleton (one per storage path).
  *
- * Import order matters: @matter/nodejs MUST be imported first so that
- * the Node.js native crypto / network / storage implementations are
- * registered before any Matter object is created.
+ * @matter/nodejs is required lazily inside _doStart() so that we can set
+ * MATTER_STORAGE_DRIVER in process.env *before* Boot.init fires and reads
+ * the driver preference through its official env-var channel.
  */
-import "@matter/nodejs";
 import type { PairedNode } from "@project-chip/matter.js/device";
 export interface ClusterInfo {
     clusterId: number;
