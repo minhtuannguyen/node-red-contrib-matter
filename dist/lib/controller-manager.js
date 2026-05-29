@@ -254,17 +254,26 @@ class ControllerManager {
         // bandwidth is narrow and each open CASE session holds several kilobytes of
         // crypto state in RAM.  For 4 Thread devices this halves the worst-case
         // concurrent-session count during the startup subscription storm and smooths
-        // out reconnection bursts.  New in matter.js 0.17.0.
-        // eslint-disable-next-line @typescript-eslint/no-require-imports
-        const { NetworkProfiles } = require("@matter/protocol");
-        env.get(NetworkProfiles).defaults = {
-            thread: {
-                exchanges: 2,
-                delay: Millis(250),
-                connect: { exchanges: 2, timeout: Seconds(10) },
-                probeAddress: { exchanges: 1, timeout: Seconds(15) },
-            },
-        };
+        // out reconnection bursts.  New in matter.js 0.17.0 — guarded so older
+        // installed packages don't crash startup.
+        try {
+            // eslint-disable-next-line @typescript-eslint/no-require-imports
+            const { NetworkProfiles } = require("@matter/protocol");
+            if (NetworkProfiles) {
+                env.get(NetworkProfiles).defaults = {
+                    thread: {
+                        exchanges: 2,
+                        delay: Millis(250),
+                        connect: { exchanges: 2, timeout: Seconds(10) },
+                        probeAddress: { exchanges: 1, timeout: Seconds(15) },
+                    },
+                };
+                logger.info("Thread NetworkProfile tuned: exchanges=2, delay=250ms");
+            }
+        }
+        catch (e) {
+            logger.warn(`Thread NetworkProfile tuning skipped (non-critical): ${e}`);
+        }
         this.controller = new matter_js_1.CommissioningController({
             environment: {
                 environment: env,
