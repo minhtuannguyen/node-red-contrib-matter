@@ -293,7 +293,6 @@ export declare class ControllerManager {
     registerDevice(nodeIdStr: string, labelOverride?: string): Promise<void>;
     private loadRegistry;
     private saveRegistry;
-    private buildNodeInfo;
     private getOrCreateHandlerSet;
 }
 //# sourceMappingURL=controller-manager.d.ts.map

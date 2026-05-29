@@ -31,6 +31,8 @@ jest.mock("@matter/general", () => ({
     FATAL:  5,
   },
   StorageService: class StorageService {},
+  Millis: jest.fn((ms: number) => ms),
+  Seconds: jest.fn((s: number) => s * 1000),
   // Used via dynamic require() inside _doStart()
   Environment: {
     default: {
@@ -38,6 +40,10 @@ jest.mock("@matter/general", () => ({
       get: jest.fn(() => ({ configuredDriver: undefined })),
     },
   },
+}));
+
+jest.mock("@matter/protocol", () => ({
+  NetworkProfiles: class NetworkProfiles {},
 }));
 
 jest.mock("@matter/types", () => ({

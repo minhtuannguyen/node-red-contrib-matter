@@ -368,7 +368,7 @@ export class ControllerManager {
     require("@matter/nodejs");
 
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { Environment, StorageService } = require("@matter/general") as typeof import("@matter/general");
+    const { Environment, StorageService, Millis, Seconds } = require("@matter/general") as typeof import("@matter/general");
     const env = Environment.default;
     env.vars.set("storage.path", this.storagePath);
 
@@ -379,6 +379,23 @@ export class ControllerManager {
       env.get(StorageService).configuredDriver = "sqlite";
     }
 
+    // Tune the Thread network-profile: reduce concurrent exchanges 4 → 2 per
+    // channel with a 250 ms inter-exchange delay (up from 100 ms).  Thread mesh
+    // bandwidth is narrow and each open CASE session holds several kilobytes of
+    // crypto state in RAM.  For 4 Thread devices this halves the worst-case
+    // concurrent-session count during the startup subscription storm and smooths
+    // out reconnection bursts.  New in matter.js 0.17.0.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { NetworkProfiles } = require("@matter/protocol") as typeof import("@matter/protocol");
+    env.get(NetworkProfiles).defaults = {
+      thread: {
+        exchanges: 2,
+        delay: Millis(250),
+        connect: { exchanges: 2, timeout: Seconds(10) },
+        probeAddress: { exchanges: 1, timeout: Seconds(15) },
+      },
+    };
+
     this.controller = new CommissioningController({
       environment: {
         environment: env,
@@ -386,6 +403,8 @@ export class ControllerManager {
       },
       autoConnect: false,
       adminFabricLabel: "node-red-matter",
+      tcp: false,               // disable TCP transport — all our devices are UDP/Thread
+      transportPreference: "udp",
       basicInformation: {
         productName: "node-red-contrib-matter",
       },
@@ -659,52 +678,56 @@ export class ControllerManager {
    */
   async readSignalStrength(nodeIdStr: string): Promise<SignalInfo> {
     const node = await this.getOrConnectNode(nodeIdStr, false);
-    const ep0  = node.getDeviceById(EndpointNumber(0));
-    const threadClient = ep0?.getClusterClientById(ClusterId(0x0035));
-    if (!threadClient) return { type: 'unknown', level: 'unknown' };
+    try {
+      const ep0  = node.getDeviceById(EndpointNumber(0));
+      const threadClient = ep0?.getClusterClientById(ClusterId(0x0035));
+      if (!threadClient) return { type: 'unknown', level: 'unknown' };
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const readAttr = async (name: string): Promise<any> => {
-      if (!threadClient.attributes[name]) return undefined;
-      // get(false) = read from local subscription cache, zero network I/O
-      try { return await (threadClient.attributes[name] as any).get(false); } catch { return undefined; }
-    };
-
-    const [neighborTable, detachedCount, parentChanges, attachAttempts] = await Promise.all([
-      readAttr('neighborTable'),
-      readAttr('detachedRoleCount'),
-      readAttr('parentChangeCount'),
-      readAttr('attachAttemptCount'),
-    ]);
-
-    let minRssi: number | undefined;
-    let avgLqi: number | undefined;
-    let neighborCount: number | undefined;
-
-    if (Array.isArray(neighborTable) && neighborTable.length > 0) {
-      neighborCount = neighborTable.length;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const rssis = (neighborTable.map((n: any) => n.averageRssi ?? n.lastRssi) as unknown[]).filter((r): r is number => typeof r === 'number');
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const lqis  = (neighborTable.map((n: any) => n.lqi) as unknown[]).filter((l): l is number => typeof l === 'number');
-      minRssi = rssis.length ? Math.min(...rssis) : undefined;
-      avgLqi  = lqis.length  ? Math.round(lqis.reduce((a, b) => a + b, 0) / lqis.length) : undefined;
+      const readAttr = async (name: string): Promise<any> => {
+        if (!threadClient.attributes[name]) return undefined;
+        // get(false) = read from local subscription cache, zero network I/O
+        try { return await (threadClient.attributes[name] as any).get(false); } catch { return undefined; }
+      };
+
+      const [neighborTable, detachedCount, parentChanges, attachAttempts] = await Promise.all([
+        readAttr('neighborTable'),
+        readAttr('detachedRoleCount'),
+        readAttr('parentChangeCount'),
+        readAttr('attachAttemptCount'),
+      ]);
+
+      let minRssi: number | undefined;
+      let avgLqi: number | undefined;
+      let neighborCount: number | undefined;
+
+      if (Array.isArray(neighborTable) && neighborTable.length > 0) {
+        neighborCount = neighborTable.length;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const rssis = (neighborTable.map((n: any) => n.averageRssi ?? n.lastRssi) as unknown[]).filter((r): r is number => typeof r === 'number');
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const lqis  = (neighborTable.map((n: any) => n.lqi) as unknown[]).filter((l): l is number => typeof l === 'number');
+        minRssi = rssis.length ? Math.min(...rssis) : undefined;
+        avgLqi  = lqis.length  ? Math.round(lqis.reduce((a, b) => a + b, 0) / lqis.length) : undefined;
+      }
+
+      const level: SignalInfo['level'] = minRssi !== undefined
+        ? (minRssi >= -70 ? 'good' : minRssi >= -85 ? 'fair' : 'poor')
+        : (avgLqi  !== undefined ? (avgLqi >= 180 ? 'good' : avgLqi >= 100 ? 'fair' : 'poor') : 'unknown');
+
+      return {
+        type: 'Thread',
+        rssi: minRssi,
+        lqi: avgLqi,
+        neighborCount,
+        detachedCount:  typeof detachedCount  === 'number' ? detachedCount  : undefined,
+        parentChanges:  typeof parentChanges   === 'number' ? parentChanges   : undefined,
+        attachAttempts: typeof attachAttempts  === 'number' ? attachAttempts  : undefined,
+        level,
+      };
+    } finally {
+      await this.releaseIfTransient(nodeIdStr, node);
     }
-
-    const level: SignalInfo['level'] = minRssi !== undefined
-      ? (minRssi >= -70 ? 'good' : minRssi >= -85 ? 'fair' : 'poor')
-      : (avgLqi  !== undefined ? (avgLqi >= 180 ? 'good' : avgLqi >= 100 ? 'fair' : 'poor') : 'unknown');
-
-    return {
-      type: 'Thread',
-      rssi: minRssi,
-      lqi: avgLqi,
-      neighborCount,
-      detachedCount:  typeof detachedCount  === 'number' ? detachedCount  : undefined,
-      parentChanges:  typeof parentChanges   === 'number' ? parentChanges   : undefined,
-      attachAttempts: typeof attachAttempts  === 'number' ? attachAttempts  : undefined,
-      level,
-    };
   }
 
   /**
@@ -1314,15 +1337,6 @@ export class ControllerManager {
     // Async write — never blocks the event loop (critical on Pi with slow SD card).
     writeFile(this.registryPath, JSON.stringify(this.registry), "utf8")
       .catch(e => logger.warn(`Failed to save device registry: ${e}`));
-  }
-
-  private buildNodeInfo(node: PairedNode): NodeInfo {
-    const devices = node.getDevices();
-    const endpoints: EndpointInfo[] = devices.map(device => ({
-      endpointId: device.number ?? 0,
-      clusterIds: [],
-    }));
-    return { nodeId: node.nodeId.toString(), endpoints };
   }
 
   private getOrCreateHandlerSet<T>(
