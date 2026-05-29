@@ -240,7 +240,7 @@ class ControllerManager {
         // eslint-disable-next-line @typescript-eslint/no-require-imports
         require("@matter/nodejs");
         // eslint-disable-next-line @typescript-eslint/no-require-imports
-        const { Environment, StorageService, Millis, Seconds } = require("@matter/general");
+        const { Environment, StorageService } = require("@matter/general");
         const env = Environment.default;
         env.vars.set("storage.path", this.storagePath);
         // Belt-and-suspenders: also set configuredDriver directly on the
@@ -249,22 +249,6 @@ class ControllerManager {
         if (nodeMajor >= 22) {
             env.get(StorageService).configuredDriver = "sqlite";
         }
-        // Tune the Thread network-profile: reduce concurrent exchanges 4 → 2 per
-        // channel with a 250 ms inter-exchange delay (up from 100 ms).  Thread mesh
-        // bandwidth is narrow and each open CASE session holds several kilobytes of
-        // crypto state in RAM.  For 4 Thread devices this halves the worst-case
-        // concurrent-session count during the startup subscription storm and smooths
-        // out reconnection bursts.  New in matter.js 0.17.0.
-        // eslint-disable-next-line @typescript-eslint/no-require-imports
-        const { NetworkProfiles } = require("@matter/protocol");
-        env.get(NetworkProfiles).defaults = {
-            thread: {
-                exchanges: 2,
-                delay: Millis(250),
-                connect: { exchanges: 2, timeout: Seconds(10) },
-                probeAddress: { exchanges: 1, timeout: Seconds(15) },
-            },
-        };
         this.controller = new matter_js_1.CommissioningController({
             environment: {
                 environment: env,
@@ -272,8 +256,6 @@ class ControllerManager {
             },
             autoConnect: false,
             adminFabricLabel: "node-red-matter",
-            tcp: false, // disable TCP transport — all our devices are UDP/Thread
-            transportPreference: "udp",
             basicInformation: {
                 productName: "node-red-contrib-matter",
             },
@@ -486,58 +468,53 @@ class ControllerManager {
      */
     async readSignalStrength(nodeIdStr) {
         const node = await this.getOrConnectNode(nodeIdStr, false);
-        try {
-            const ep0 = node.getDeviceById((0, types_1.EndpointNumber)(0));
-            const threadClient = ep0?.getClusterClientById((0, types_1.ClusterId)(0x0035));
-            if (!threadClient)
-                return { type: 'unknown', level: 'unknown' };
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            const readAttr = async (name) => {
-                if (!threadClient.attributes[name])
-                    return undefined;
-                // get(false) = read from local subscription cache, zero network I/O
-                try {
-                    return await threadClient.attributes[name].get(false);
-                }
-                catch {
-                    return undefined;
-                }
-            };
-            const [neighborTable, detachedCount, parentChanges, attachAttempts] = await Promise.all([
-                readAttr('neighborTable'),
-                readAttr('detachedRoleCount'),
-                readAttr('parentChangeCount'),
-                readAttr('attachAttemptCount'),
-            ]);
-            let minRssi;
-            let avgLqi;
-            let neighborCount;
-            if (Array.isArray(neighborTable) && neighborTable.length > 0) {
-                neighborCount = neighborTable.length;
-                // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                const rssis = neighborTable.map((n) => n.averageRssi ?? n.lastRssi).filter((r) => typeof r === 'number');
-                // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                const lqis = neighborTable.map((n) => n.lqi).filter((l) => typeof l === 'number');
-                minRssi = rssis.length ? Math.min(...rssis) : undefined;
-                avgLqi = lqis.length ? Math.round(lqis.reduce((a, b) => a + b, 0) / lqis.length) : undefined;
+        const ep0 = node.getDeviceById((0, types_1.EndpointNumber)(0));
+        const threadClient = ep0?.getClusterClientById((0, types_1.ClusterId)(0x0035));
+        if (!threadClient)
+            return { type: 'unknown', level: 'unknown' };
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const readAttr = async (name) => {
+            if (!threadClient.attributes[name])
+                return undefined;
+            // get(false) = read from local subscription cache, zero network I/O
+            try {
+                return await threadClient.attributes[name].get(false);
             }
-            const level = minRssi !== undefined
-                ? (minRssi >= -70 ? 'good' : minRssi >= -85 ? 'fair' : 'poor')
-                : (avgLqi !== undefined ? (avgLqi >= 180 ? 'good' : avgLqi >= 100 ? 'fair' : 'poor') : 'unknown');
-            return {
-                type: 'Thread',
-                rssi: minRssi,
-                lqi: avgLqi,
-                neighborCount,
-                detachedCount: typeof detachedCount === 'number' ? detachedCount : undefined,
-                parentChanges: typeof parentChanges === 'number' ? parentChanges : undefined,
-                attachAttempts: typeof attachAttempts === 'number' ? attachAttempts : undefined,
-                level,
-            };
+            catch {
+                return undefined;
+            }
+        };
+        const [neighborTable, detachedCount, parentChanges, attachAttempts] = await Promise.all([
+            readAttr('neighborTable'),
+            readAttr('detachedRoleCount'),
+            readAttr('parentChangeCount'),
+            readAttr('attachAttemptCount'),
+        ]);
+        let minRssi;
+        let avgLqi;
+        let neighborCount;
+        if (Array.isArray(neighborTable) && neighborTable.length > 0) {
+            neighborCount = neighborTable.length;
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const rssis = neighborTable.map((n) => n.averageRssi ?? n.lastRssi).filter((r) => typeof r === 'number');
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const lqis = neighborTable.map((n) => n.lqi).filter((l) => typeof l === 'number');
+            minRssi = rssis.length ? Math.min(...rssis) : undefined;
+            avgLqi = lqis.length ? Math.round(lqis.reduce((a, b) => a + b, 0) / lqis.length) : undefined;
         }
-        finally {
-            await this.releaseIfTransient(nodeIdStr, node);
-        }
+        const level = minRssi !== undefined
+            ? (minRssi >= -70 ? 'good' : minRssi >= -85 ? 'fair' : 'poor')
+            : (avgLqi !== undefined ? (avgLqi >= 180 ? 'good' : avgLqi >= 100 ? 'fair' : 'poor') : 'unknown');
+        return {
+            type: 'Thread',
+            rssi: minRssi,
+            lqi: avgLqi,
+            neighborCount,
+            detachedCount: typeof detachedCount === 'number' ? detachedCount : undefined,
+            parentChanges: typeof parentChanges === 'number' ? parentChanges : undefined,
+            attachAttempts: typeof attachAttempts === 'number' ? attachAttempts : undefined,
+            level,
+        };
     }
     /**
      * Discover all endpoints and clusters of a commissioned node.
@@ -1126,6 +1103,14 @@ class ControllerManager {
         // Async write — never blocks the event loop (critical on Pi with slow SD card).
         (0, promises_1.writeFile)(this.registryPath, JSON.stringify(this.registry), "utf8")
             .catch(e => logger.warn(`Failed to save device registry: ${e}`));
+    }
+    buildNodeInfo(node) {
+        const devices = node.getDevices();
+        const endpoints = devices.map(device => ({
+            endpointId: device.number ?? 0,
+            clusterIds: [],
+        }));
+        return { nodeId: node.nodeId.toString(), endpoints };
     }
     getOrCreateHandlerSet(map, key) {
         if (!map.has(key))
