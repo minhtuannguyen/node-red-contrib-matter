@@ -30,12 +30,11 @@ jest.mock("@matter/general", () => ({
     ERROR:  4,
     FATAL:  5,
   },
-  StorageService: class StorageService {},
   // Used via dynamic require() inside _doStart()
   Environment: {
     default: {
       vars: { set: jest.fn() },
-      get: jest.fn(() => ({ configuredDriver: undefined })),
+      get: jest.fn(() => ({})),
     },
   },
 }));

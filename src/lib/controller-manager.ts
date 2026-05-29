@@ -347,37 +347,15 @@ export class ControllerManager {
     // level from the first log call. This was previously a dead config option.
     this.applyLogLevel(this.logLevel);
 
-    // Switch to SQLite storage on Node.js 22+ (node:sqlite is unavailable on 20.x).
-    // This consolidates thousands of attribute-cache files and dramatically reduces
-    // SD-card write pressure beyond the built-in 20-minute buffer added in 0.17.0.
-    const nodeMajor = parseInt(process.versions.node.split(".")[0], 10);
-
-    // Set the driver preference via process.env BEFORE Boot.init fires so that
-    // NodeJsEnvironment.configureStorage() reads it through the official
-    // env-var channel (addUnixEnvStyle reads MATTER_STORAGE_DRIVER →
-    // storage.driver → service.configuredDriver = "sqlite").
-    if (nodeMajor >= 22) {
-      process.env["MATTER_STORAGE_DRIVER"] = "sqlite";
-    }
-
     // Require @matter/nodejs here (not at module top level) so Boot.init fires
-    // only after the env var above is already set.  On subsequent calls the
-    // module cache makes this a no-op, so the driver preference falls through
-    // to the belt-and-suspenders set() below.
+    // after any environment configuration is already set.
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     require("@matter/nodejs");
 
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { Environment, StorageService } = require("@matter/general") as typeof import("@matter/general");
+    const { Environment } = require("@matter/general") as typeof import("@matter/general");
     const env = Environment.default;
     env.vars.set("storage.path", this.storagePath);
-
-    // Belt-and-suspenders: also set configuredDriver directly on the
-    // StorageService instance in case @matter/nodejs was already loaded
-    // (e.g. by another plugin) before our process.env assignment above.
-    if (nodeMajor >= 22) {
-      env.get(StorageService).configuredDriver = "sqlite";
-    }
 
     this.controller = new CommissioningController({
       environment: {
