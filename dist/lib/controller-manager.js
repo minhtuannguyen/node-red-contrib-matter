@@ -262,12 +262,31 @@ class ControllerManager {
         });
         await this.controller.start();
         this.started = true;
-        // On Node.js 22+, StorageService renames the entire node-red-matter/ directory
-        // during SQLite migration, which moves registry.json into the backup.  Write
-        // the in-memory registry back to the new location so it survives a restart
-        // even if no commissioning/decommission event calls saveRegistry() first.
-        if (nodeMajor >= 22)
-            this.saveRegistry();
+        // Recovery: if any commissioned nodes are absent from registry.json (e.g., the
+        // file was moved into the SQLite migration backup and the process exited before
+        // the write-back completed), add a placeholder entry immediately so the device
+        // appears in the UI dropdown.  registerDevice() fills in the real label and
+        // cluster info in the background once the device is reachable.
+        const commissionedIds = (this.controller.getCommissionedNodes() ?? []).map(id => id.toString());
+        const missingIds = commissionedIds.filter(id => !this.registry[id]);
+        if (missingIds.length > 0) {
+            logger.warn(`${missingIds.length} commissioned device(s) missing from registry — recovering`);
+            for (const id of missingIds) {
+                this.registry[id] = {
+                    label: `Device ${id}`,
+                    nodeId: id,
+                    discoveredAt: new Date().toISOString(),
+                    discovery: { nodeId: id, endpoints: [] },
+                };
+                this.registerDevice(id).catch(e => logger.warn(`Auto re-register failed for ${id}: ${e}`));
+            }
+        }
+        // Always persist the registry at startup (awaited, not fire-and-forget).
+        // After a SQLite migration the old node-red-matter/ directory (containing
+        // registry.json) is renamed to a backup and a fresh directory is created;
+        // this write puts the file back in the new location before _doStart() returns.
+        await (0, promises_1.writeFile)(this.registryPath, JSON.stringify(this.registry), "utf8")
+            .catch(e => logger.warn(`Failed to persist registry on startup: ${e}`));
         logger.info(`Matter controller started — storage: ${this.storagePath}`);
     }
     async close() {
