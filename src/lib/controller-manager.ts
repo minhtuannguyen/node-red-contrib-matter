@@ -832,9 +832,16 @@ export class ControllerManager {
       }
     })();
 
-    this.subscribingPromises.set(nodeIdStr, work.finally(() => {
+    const deduped = work.finally(() => {
       this.subscribingPromises.delete(nodeIdStr);
-    }));
+    });
+    // Suppress unhandled-rejection on the stored promise. Callers who await
+    // `deduped` from the map still see the rejection through their own chain;
+    // this just prevents the "unhandled rejection" event when no concurrent
+    // caller happens to be waiting on it, which would otherwise crash node-red
+    // via matter.js's Unhandled error re-throw.
+    deduped.catch(() => {});
+    this.subscribingPromises.set(nodeIdStr, deduped);
     return work;
   }
 
