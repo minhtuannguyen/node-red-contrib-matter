@@ -347,8 +347,15 @@ export class ControllerManager {
     // level from the first log call. This was previously a dead config option.
     this.applyLogLevel(this.logLevel);
 
-    // Require @matter/nodejs here (not at module top level) so Boot.init fires
-    // after any environment configuration is already set.
+    // Dynamic require() to load ESM modules in CJS context. Must be done here
+    // (not at module top level) so Boot.init() fires AFTER environment
+    // configuration. See matter.js Boot.ts for initialization sequence.
+    // We use file storage only (not SQLite) due to an upstream packaging bug
+    // in @matter/nodejs@0.17.0: the sqlite driver is registered via
+    // `await import("#storage/sqlite/index.js")`, but the "imports" field
+    // maps to "/src/*" (TypeScript source), which can't resolve re-exports in
+    // Node.js CJS context. Stays broken until @matter/nodejs fixes the
+    // "imports" field to point to "/dist/*" (compiled JS).
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     require("@matter/nodejs");
 
@@ -835,12 +842,13 @@ export class ControllerManager {
     const deduped = work.finally(() => {
       this.subscribingPromises.delete(nodeIdStr);
     });
-    // Suppress unhandled-rejection on the stored promise. Callers who await
-    // `deduped` from the map still see the rejection through their own chain;
-    // this just prevents the "unhandled rejection" event when no concurrent
-    // caller happens to be waiting on it, which would otherwise crash node-red
-    // via matter.js's Unhandled error re-throw.
-    deduped.catch(() => {});
+    // Attach error handler to the stored promise. Callers who await `work`
+    // (not `deduped`) still see the rejection; this handler only fires if
+    // no concurrent caller is waiting on it, preventing unhandled-rejection
+    // errors that would crash node-red via matter.js's Unhandled class.
+    deduped.catch((err) => {
+      logger.debug(`Subscription setup failed for ${nodeIdStr}: ${err.message}`);
+    });
     this.subscribingPromises.set(nodeIdStr, deduped);
     return work;
   }
