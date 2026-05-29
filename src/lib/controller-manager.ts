@@ -535,7 +535,7 @@ export class ControllerManager {
     const connectOptions: CommissioningControllerNodeOptions = {
       autoSubscribe: false,
       subscribeMinIntervalFloorSeconds: 30,    // batch updates — reduces SDK storage writes on Pi
-      subscribeMaxIntervalCeilingSeconds: 120, // keepalive: device must report at least every 2 min
+      subscribeMaxIntervalCeilingSeconds: 300, // keepalive every 5 min — reduces SQLite write pressure
     };
 
     const node = await ctrl.connectNode(nodeId, connectOptions);
@@ -861,7 +861,140 @@ export class ControllerManager {
   }
 
   private async activateSubscriptions(nodeIdStr: string, node: PairedNode): Promise<void> {
-    await this.activateFullSubscription(nodeIdStr, node);
+    if (this.canUseSelectiveSubscription(nodeIdStr)) {
+      await this.activateSelectiveSubscription(nodeIdStr, node);
+    } else {
+      await this.activateFullSubscription(nodeIdStr, node);
+    }
+  }
+
+  /**
+   * Returns true when every registered handler for `nodeIdStr` supplies a
+   * clusterId filter, meaning we can use a selective Matter Subscribe Request
+   * (one message, specific cluster paths) instead of subscribing to the whole
+   * device. This cuts per-device cached data from ~15 MB to ~1-2 MB.
+   */
+  private canUseSelectiveSubscription(nodeIdStr: string): boolean {
+    const attrHandlers = this.attrHandlers.get(nodeIdStr);
+    const evtHandlers  = this.eventHandlers.get(nodeIdStr);
+    const attrFilters  = this.attrHandlerFilters.get(nodeIdStr);
+    const evtFilters   = this.eventHandlerFilters.get(nodeIdStr);
+
+    const attrOk = !attrHandlers?.size ||
+      [...attrHandlers].every(h => attrFilters?.get(h)?.clusterId !== undefined);
+    const evtOk  = !evtHandlers?.size ||
+      [...evtHandlers].every(h => evtFilters?.get(h)?.clusterId !== undefined);
+
+    return attrOk && evtOk;
+  }
+
+  /**
+   * Selective subscription using InteractionClient.subscribeMultipleAttributesAndEvents().
+   * Sends a single Matter Subscribe Request listing only the specific cluster IDs
+   * that have registered handlers. The device pushes only those clusters, so
+   * matter.js only caches that data — dramatically less memory than full subscription.
+   *
+   * Falls back to full subscription if getInteractionClient() fails.
+   */
+  private async activateSelectiveSubscription(nodeIdStr: string, node: PairedNode): Promise<void> {
+    // Collect the unique cluster IDs across all attribute and event handler filters.
+    const attrClusterIds = new Set<number>();
+    const evtClusterIds  = new Set<number>();
+
+    for (const filter of (this.attrHandlerFilters.get(nodeIdStr)?.values() ?? [])) {
+      if (filter.clusterId !== undefined) attrClusterIds.add(filter.clusterId);
+    }
+    for (const filter of (this.eventHandlerFilters.get(nodeIdStr)?.values() ?? [])) {
+      if (filter.clusterId !== undefined) evtClusterIds.add(filter.clusterId);
+    }
+
+    if (attrClusterIds.size === 0 && evtClusterIds.size === 0) {
+      // Degenerate: no handlers at all — nothing to subscribe to.
+      return;
+    }
+
+    let interactionClient: ReturnType<PairedNode["getInteractionClient"]>;
+    try {
+      interactionClient = node.getInteractionClient();
+    } catch (e) {
+      logger.warn(`getInteractionClient() failed for node ${nodeIdStr}, falling back to full subscription: ${e}`);
+      await this.activateFullSubscription(nodeIdStr, node);
+      return;
+    }
+
+    const attributePaths = [...attrClusterIds].map(clusterId => ({
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      clusterId: ClusterId(clusterId) as any,
+    }));
+    const eventPaths = [...evtClusterIds].map(clusterId => ({
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      clusterId: ClusterId(clusterId) as any,
+    }));
+
+    const attrListener = (data: { path: { endpointId: number; clusterId: number; attributeName: string }; value: unknown }) => {
+      const handlers = this.attrHandlers.get(nodeIdStr);
+      if (!handlers?.size) return;
+      const filters = this.attrHandlerFilters.get(nodeIdStr);
+      const event: AttributeChangedEvent = {
+        nodeId: nodeIdStr,
+        endpointId: data.path.endpointId,
+        clusterId: data.path.clusterId,
+        clusterName: CLUSTER_NAMES[data.path.clusterId] ?? `0x${data.path.clusterId.toString(16).toUpperCase().padStart(4, '0')}`,
+        attributeName: data.path.attributeName,
+        value: data.value,
+        timestamp: new Date().toISOString(),
+      };
+      for (const h of handlers) {
+        const f = filters?.get(h);
+        if (f) {
+          if (f.clusterId    !== undefined && f.clusterId    !== data.path.clusterId)    continue;
+          if (f.endpointId   !== undefined && f.endpointId   !== data.path.endpointId)   continue;
+          if (f.attributeName !== undefined && f.attributeName !== data.path.attributeName) continue;
+        }
+        try { h(event); } catch { /* keep other handlers running */ }
+      }
+    };
+
+    const evtListener = (data: { path: { endpointId: number; clusterId: number; eventName: string }; events: unknown[] }) => {
+      const handlers = this.eventHandlers.get(nodeIdStr);
+      if (!handlers?.size) return;
+      const filters = this.eventHandlerFilters.get(nodeIdStr);
+      const event: EventTriggeredEvent = {
+        nodeId: nodeIdStr,
+        endpointId: data.path.endpointId,
+        clusterId: data.path.clusterId,
+        clusterName: CLUSTER_NAMES[data.path.clusterId] ?? `0x${data.path.clusterId.toString(16).toUpperCase().padStart(4, '0')}`,
+        eventName: data.path.eventName,
+        events: [...data.events],
+        timestamp: new Date().toISOString(),
+      };
+      for (const h of handlers) {
+        const f = filters?.get(h);
+        if (f) {
+          if (f.clusterId  !== undefined && f.clusterId  !== data.path.clusterId)  continue;
+          if (f.endpointId !== undefined && f.endpointId !== data.path.endpointId) continue;
+          if (f.eventName  !== undefined && f.eventName  !== data.path.eventName)  continue;
+        }
+        try { h(event); } catch { /* keep other handlers running */ }
+      }
+    };
+
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (interactionClient as any).subscribeMultipleAttributesAndEvents({
+        attributes: attributePaths,
+        events:     eventPaths,
+        minIntervalFloorSeconds:   30,
+        maxIntervalCeilingSeconds: 300,
+        attributeListener: attrListener,
+        eventListener:     evtListener,
+      });
+      this.setupStateHandler(nodeIdStr, node);
+      logger.info(`Selectively subscribed to clusters [${[...attrClusterIds].map(c => '0x' + c.toString(16)).join(', ')}] for node ${nodeIdStr}`);
+    } catch (e) {
+      logger.warn(`Selective subscription failed for node ${nodeIdStr}, falling back to full: ${e}`);
+      await this.activateFullSubscription(nodeIdStr, node);
+    }
   }
 
   /**

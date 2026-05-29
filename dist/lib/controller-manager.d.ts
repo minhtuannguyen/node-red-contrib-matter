@@ -215,6 +215,22 @@ export declare class ControllerManager {
     private ensureSubscribed;
     private activateSubscriptions;
     /**
+     * Returns true when every registered handler for `nodeIdStr` supplies a
+     * clusterId filter, meaning we can use a selective Matter Subscribe Request
+     * (one message, specific cluster paths) instead of subscribing to the whole
+     * device. This cuts per-device cached data from ~15 MB to ~1-2 MB.
+     */
+    private canUseSelectiveSubscription;
+    /**
+     * Selective subscription using InteractionClient.subscribeMultipleAttributesAndEvents().
+     * Sends a single Matter Subscribe Request listing only the specific cluster IDs
+     * that have registered handlers. The device pushes only those clusters, so
+     * matter.js only caches that data — dramatically less memory than full subscription.
+     *
+     * Falls back to full subscription if getInteractionClient() fails.
+     */
+    private activateSelectiveSubscription;
+    /**
      * Subscribes to all attributes and events on the device via
      * `subscribeAllAttributesAndEvents` — the only matter.js v0.16 API that
      * reliably delivers ongoing device-pushed reports.
