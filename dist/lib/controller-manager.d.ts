@@ -2,9 +2,11 @@
  * ControllerManager — wraps the matter.js CommissioningController in a
  * Node-RED-friendly singleton (one per storage path).
  *
- * @matter/nodejs is required lazily inside _doStart() so that we can set
- * MATTER_STORAGE_DRIVER in process.env *before* Boot.init fires and reads
- * the driver preference through its official env-var channel.
+ * @matter/nodejs is required lazily inside _doStart() so that Boot.init fires
+ * after environment configuration. The SQLite storage driver is loaded from
+ * the compiled CJS path directly (bypassing the broken "#storage" import alias
+ * in @matter/nodejs@0.17.0) and re-registered on StorageService via the public
+ * registerDriver() API.
  */
 import type { PairedNode } from "@project-chip/matter.js/device";
 export interface ClusterInfo {

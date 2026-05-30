@@ -398,25 +398,6 @@ cd ~/.node-red/node_modules
 ln -s /path/to/node-red-contrib-matter node-red-contrib-matter
 ```
 
----
-
-## Storage & Limitations
-
-### File Storage
-
-This plugin uses file-based storage (one file per attribute value) for device fabric credentials and registry. This is stable and works on all platforms (Linux, macOS, Raspberry Pi).
-
-**Performance impact on Raspberry Pi:**
-- Hundreds of small files accumulate in `~/.node-red-matter/node-red-matter/` over time
-- SD card write wear increases; consider using USB storage or journaling filesystems
-- Registry cleanups (`registryCleanInterval`) remove stale device data automatically
-
-### SQLite (Not Available)
-
-The upstream `@matter/nodejs@0.17.0` package includes a SQLite driver that would consolidate files into a single database, but it's broken in CommonJS context due to a packaging bug (`"imports": {"#*": "./src/*"}` maps to TypeScript source files that can't be loaded via dynamic imports in CJS). This plugin stays on file storage until a future version of matter.js fixes the `"imports"` field.
-
----
-
 ## License
 
 Apache 2.0

@@ -3,9 +3,11 @@
  * ControllerManager — wraps the matter.js CommissioningController in a
  * Node-RED-friendly singleton (one per storage path).
  *
- * @matter/nodejs is required lazily inside _doStart() so that we can set
- * MATTER_STORAGE_DRIVER in process.env *before* Boot.init fires and reads
- * the driver preference through its official env-var channel.
+ * @matter/nodejs is required lazily inside _doStart() so that Boot.init fires
+ * after environment configuration. The SQLite storage driver is loaded from
+ * the compiled CJS path directly (bypassing the broken "#storage" import alias
+ * in @matter/nodejs@0.17.0) and re-registered on StorageService via the public
+ * registerDriver() API.
  */
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.ControllerManager = void 0;
@@ -222,21 +224,54 @@ class ControllerManager {
         // subsystems (CASE, mDNS, TLV, protocol handlers) respect the configured
         // level from the first log call. This was previously a dead config option.
         this.applyLogLevel(this.logLevel);
-        // Dynamic require() to load ESM modules in CJS context. Must be done here
-        // (not at module top level) so Boot.init() fires AFTER environment
-        // configuration. See matter.js Boot.ts for initialization sequence.
-        // We use file storage only (not SQLite) due to an upstream packaging bug
-        // in @matter/nodejs@0.17.0: the sqlite driver is registered via
-        // `await import("#storage/sqlite/index.js")`, but the "imports" field
-        // maps to "/src/*" (TypeScript source), which can't resolve re-exports in
-        // Node.js CJS context. Stays broken until @matter/nodejs fixes the
-        // "imports" field to point to "/dist/*" (compiled JS).
+        // Require @matter/nodejs here (not at module top level) so Boot.init fires
+        // after any environment configuration. The module cache makes subsequent
+        // calls a no-op — safe to call multiple times.
         // eslint-disable-next-line @typescript-eslint/no-require-imports
         require("@matter/nodejs");
         // eslint-disable-next-line @typescript-eslint/no-require-imports
-        const { Environment } = require("@matter/general");
+        const { Environment, StorageService } = require("@matter/general");
         const env = Environment.default;
         env.vars.set("storage.path", this.storagePath);
+        // Fix the broken sqlite driver registration in @matter/nodejs@0.17.0.
+        //
+        // Root cause: NodeJsEnvironment registers the sqlite driver with a lazy
+        // `await import("#storage/sqlite/index.js")` callback. The "imports" field
+        // in @matter/nodejs/package.json maps "#*" → "./src/*" (TypeScript source).
+        // Node.js 24 loads the .ts file via strip-types, but the re-exports inside
+        // it (e.g. `from "./SqliteStorageDriver.js"`) silently fail because Node.js
+        // doesn't remap .js → .ts for transitive imports. Result: SqliteStorageDriver
+        // is undefined when StorageService tries to create it.
+        //
+        // Fix: load the compiled CJS sqlite module via absolute path (which bypasses
+        // both the broken "imports" alias and the "exports" package restriction), then
+        // call StorageService.registerDriver() which uses Map.set() internally and
+        // replaces the broken registration with our working one.
+        //
+        // Falls back to file storage if:
+        //  - node:sqlite is unavailable (Node.js < v22.5.0)
+        //  - The @matter/nodejs dist/ structure changes in a future version
+        //  - Any other unexpected error during driver loading
+        try {
+            const matterCjsDir = (0, node_path_1.dirname)(require.resolve("@matter/nodejs"));
+            const sqliteModulePath = (0, node_path_1.join)(matterCjsDir, "storage", "sqlite", "index.js");
+            // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-explicit-any
+            const sqliteMod = require(sqliteModulePath);
+            const { SqliteStorageDriver, SqliteBlobStorageDriver } = sqliteMod;
+            if (!SqliteStorageDriver || !SqliteBlobStorageDriver) {
+                throw new Error("SqliteStorageDriver or SqliteBlobStorageDriver not exported from sqlite module — " +
+                    "unexpected @matter/nodejs package structure");
+            }
+            const storageService = env.get(StorageService);
+            storageService.registerDriver(SqliteStorageDriver);
+            storageService.registerBlobDriver(SqliteBlobStorageDriver);
+            storageService.configuredDriver = "sqlite";
+            storageService.configuredBlobDriver = "sqlite";
+            logger.info("SQLite storage driver registered successfully");
+        }
+        catch (err) {
+            logger.warn(`SQLite storage driver unavailable — falling back to file storage: ${err instanceof Error ? err.message : String(err)}`);
+        }
         this.controller = new matter_js_1.CommissioningController({
             environment: {
                 environment: env,
