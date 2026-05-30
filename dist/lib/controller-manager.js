@@ -224,54 +224,23 @@ class ControllerManager {
         // subsystems (CASE, mDNS, TLV, protocol handlers) respect the configured
         // level from the first log call. This was previously a dead config option.
         this.applyLogLevel(this.logLevel);
-        // Require @matter/nodejs here (not at module top level) so Boot.init fires
-        // after any environment configuration. The module cache makes subsequent
-        // calls a no-op — safe to call multiple times.
+        // Dynamic require() to load ESM modules in CJS context. Must be done here
+        // (not at module top level) so Boot.init() fires AFTER environment
+        // configuration. See matter.js Boot.ts for initialization sequence.
+        //
+        // NOTE: We intentionally do NOT enable the SQLite storage driver despite
+        // @matter/nodejs@0.17.0 shipping one. The driver uses a single SQLite
+        // connection and cannot handle concurrent BEGIN TRANSACTION calls when
+        // multiple devices connect simultaneously at startup — causing "Transaction
+        // is in progress" errors on every device except the first. This is an
+        // upstream bug in SqliteStorageDriver.ts. Stay on file storage until
+        // matter.js fixes the concurrency issue.
         // eslint-disable-next-line @typescript-eslint/no-require-imports
         require("@matter/nodejs");
         // eslint-disable-next-line @typescript-eslint/no-require-imports
-        const { Environment, StorageService } = require("@matter/general");
+        const { Environment } = require("@matter/general");
         const env = Environment.default;
         env.vars.set("storage.path", this.storagePath);
-        // Fix the broken sqlite driver registration in @matter/nodejs@0.17.0.
-        //
-        // Root cause: NodeJsEnvironment registers the sqlite driver with a lazy
-        // `await import("#storage/sqlite/index.js")` callback. The "imports" field
-        // in @matter/nodejs/package.json maps "#*" → "./src/*" (TypeScript source).
-        // Node.js 24 loads the .ts file via strip-types, but the re-exports inside
-        // it (e.g. `from "./SqliteStorageDriver.js"`) silently fail because Node.js
-        // doesn't remap .js → .ts for transitive imports. Result: SqliteStorageDriver
-        // is undefined when StorageService tries to create it.
-        //
-        // Fix: load the compiled CJS sqlite module via absolute path (which bypasses
-        // both the broken "imports" alias and the "exports" package restriction), then
-        // call StorageService.registerDriver() which uses Map.set() internally and
-        // replaces the broken registration with our working one.
-        //
-        // Falls back to file storage if:
-        //  - node:sqlite is unavailable (Node.js < v22.5.0)
-        //  - The @matter/nodejs dist/ structure changes in a future version
-        //  - Any other unexpected error during driver loading
-        try {
-            const matterCjsDir = (0, node_path_1.dirname)(require.resolve("@matter/nodejs"));
-            const sqliteModulePath = (0, node_path_1.join)(matterCjsDir, "storage", "sqlite", "index.js");
-            // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-explicit-any
-            const sqliteMod = require(sqliteModulePath);
-            const { SqliteStorageDriver, SqliteBlobStorageDriver } = sqliteMod;
-            if (!SqliteStorageDriver || !SqliteBlobStorageDriver) {
-                throw new Error("SqliteStorageDriver or SqliteBlobStorageDriver not exported from sqlite module — " +
-                    "unexpected @matter/nodejs package structure");
-            }
-            const storageService = env.get(StorageService);
-            storageService.registerDriver(SqliteStorageDriver);
-            storageService.registerBlobDriver(SqliteBlobStorageDriver);
-            storageService.configuredDriver = "sqlite";
-            storageService.configuredBlobDriver = "sqlite";
-            logger.info("SQLite storage driver registered successfully");
-        }
-        catch (err) {
-            logger.warn(`SQLite storage driver unavailable — falling back to file storage: ${err instanceof Error ? err.message : String(err)}`);
-        }
         this.controller = new matter_js_1.CommissioningController({
             environment: {
                 environment: env,
