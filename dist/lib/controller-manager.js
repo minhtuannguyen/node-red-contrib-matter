@@ -3,11 +3,8 @@
  * ControllerManager — wraps the matter.js CommissioningController in a
  * Node-RED-friendly singleton (one per storage path).
  *
- * @matter/nodejs is required lazily inside _doStart() so that Boot.init fires
- * after environment configuration. The SQLite storage driver is loaded from
- * the compiled CJS path directly (bypassing the broken "#storage" import alias
- * in @matter/nodejs@0.17.0) and re-registered on StorageService via the public
- * registerDriver() API.
+ * @matter/nodejs is loaded lazily inside _doStart() so that Boot.init fires
+ * after environment configuration is applied.
  */
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.ControllerManager = void 0;
@@ -103,6 +100,8 @@ const CLUSTER_NAMES = {
     0x0B0B: "DeviceEnergyManagement",
     0x0B0C: "EnergyEvse",
 };
+/** Returns true when a string key is a named (non-numeric) property. */
+const isNamed = (k) => isNaN(Number(k));
 // ---------------------------------------------------------------------------
 // Singleton registry (one manager per storage path)
 // ---------------------------------------------------------------------------
@@ -128,9 +127,9 @@ class ControllerManager {
     attrHandlerFilters = new Map();
     eventHandlerFilters = new Map();
     /**
-     * Per-node subscription lock. If subscribeAllAttributesAndEvents() is already
-     * in progress for a node, concurrent callers await the same promise instead of
-     * each sending their own Subscribe Request to the device.
+     * Per-node subscription lock. If a subscription is already in progress for a
+     * node, concurrent callers await the same promise instead of each sending
+     * their own Subscribe Request to the device.
      */
     subscribingPromises = new Map();
     /**
@@ -224,23 +223,40 @@ class ControllerManager {
         // subsystems (CASE, mDNS, TLV, protocol handlers) respect the configured
         // level from the first log call. This was previously a dead config option.
         this.applyLogLevel(this.logLevel);
-        // Dynamic require() to load ESM modules in CJS context. Must be done here
-        // (not at module top level) so Boot.init() fires AFTER environment
-        // configuration. See matter.js Boot.ts for initialization sequence.
-        //
-        // NOTE: We intentionally do NOT enable the SQLite storage driver despite
-        // @matter/nodejs@0.17.0 shipping one. The driver uses a single SQLite
-        // connection and cannot handle concurrent BEGIN TRANSACTION calls when
-        // multiple devices connect simultaneously at startup — causing "Transaction
-        // is in progress" errors on every device except the first. This is an
-        // upstream bug in SqliteStorageDriver.ts. Stay on file storage until
-        // matter.js fixes the concurrency issue.
+        // Loaded here (not at module top level) so Boot.init fires after
+        // environment configuration. Uses file storage — the @matter/nodejs@0.17.0
+        // SQLite driver has a concurrency bug (nested BEGIN TRANSACTION when
+        // multiple devices connect simultaneously) so we stay on file storage.
         // eslint-disable-next-line @typescript-eslint/no-require-imports
         require("@matter/nodejs");
         // eslint-disable-next-line @typescript-eslint/no-require-imports
         const { Environment } = require("@matter/general");
         const env = Environment.default;
         env.vars.set("storage.path", this.storagePath);
+        // Tune Thread network profile: halve concurrent CASE exchanges (4→2) and
+        // increase inter-exchange gap (100ms→250ms). Each open exchange holds crypto
+        // state in RAM; tighter limits cut peak memory during the startup subscription
+        // storm when multiple Thread devices connect simultaneously.
+        try {
+            // eslint-disable-next-line @typescript-eslint/no-require-imports
+            const { NetworkProfiles } = require("@matter/protocol");
+            // Pass only the thread key — the setter deep-merges from the static
+            // NetworkProfiles.defaults so all other profiles (fast, unknown, etc.)
+            // remain untouched. Using the setter (not .defaults.thread) is required
+            // because the property has only a setter, never a getter.
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            env.get(NetworkProfiles).defaults = {
+                thread: {
+                    exchanges: 2,
+                    delay: 250, // ms (up from 100)
+                    connect: { exchanges: 2, timeout: 30_000 }, // keep 30s timeout
+                    probeAddress: { exchanges: 1, timeout: 15_000 }, // 15s timeout kept
+                },
+            };
+        }
+        catch {
+            logger.debug("NetworkProfiles Thread tuning not available — skipping");
+        }
         this.controller = new matter_js_1.CommissioningController({
             environment: {
                 environment: env,
@@ -273,10 +289,8 @@ class ControllerManager {
                 this.registerDevice(id).catch(e => logger.warn(`Auto re-register failed for ${id}: ${e}`));
             }
         }
-        // Always persist the registry at startup (awaited, not fire-and-forget).
-        // After a SQLite migration the old node-red-matter/ directory (containing
-        // registry.json) is renamed to a backup and a fresh directory is created;
-        // this write puts the file back in the new location before _doStart() returns.
+        // Persist registry at startup so the file is always current in the storage
+        // directory after any storage-path changes or clean installations.
         await (0, promises_1.writeFile)(this.registryPath, JSON.stringify(this.registry), "utf8")
             .catch(e => logger.warn(`Failed to persist registry on startup: ${e}`));
         logger.info(`Matter controller started — storage: ${this.storagePath}`);
@@ -372,13 +386,16 @@ class ControllerManager {
         }
         const ctrl = this.requireController();
         const nodeId = (0, types_1.NodeId)(BigInt(nodeIdStr));
-        // Always connect without autoSubscribe — we manage subscriptions explicitly
-        // via subscribeAllAttributesAndEvents() so it works correctly for both
-        // always-on and sleepy/ICD (Thread) devices.
+        // Manage subscriptions explicitly — matter.js autoSubscribe sends a full
+        // subscribeAllAttributesAndEvents which we replace with selective per-cluster
+        // subscriptions where possible.
         const connectOptions = {
             autoSubscribe: false,
-            subscribeMinIntervalFloorSeconds: 30, // batch updates — reduces SDK storage writes on Pi
-            subscribeMaxIntervalCeilingSeconds: 300, // keepalive every 5 min — reduces SQLite write pressure
+            // subscribeMinIntervalFloorSeconds / subscribeMaxIntervalCeilingSeconds
+            // are not set here: they configure NetworkClient.defaultSubscription which
+            // is only used by the built-in autoSubscribe path. Since autoSubscribe is
+            // false our manual subscribeMultipleAttributesAndEvents calls carry their
+            // own interval parameters directly.
         };
         const node = await ctrl.connectNode(nodeId, connectOptions);
         // Wait for local initialization (uses previously cached data if available).
@@ -439,18 +456,23 @@ class ControllerManager {
      */
     async readCachedAttribute(nodeIdStr, endpointId, clusterId, attributeName) {
         const node = await this.getOrConnectNode(nodeIdStr, false);
-        const client = node
-            .getDeviceById((0, types_1.EndpointNumber)(endpointId))
-            ?.getClusterClientById((0, types_1.ClusterId)(clusterId));
-        if (!client) {
-            throw new Error(`Cluster 0x${clusterId.toString(16)} not found on endpoint ${endpointId} of node ${nodeIdStr}`);
+        try {
+            const client = node
+                .getDeviceById((0, types_1.EndpointNumber)(endpointId))
+                ?.getClusterClientById((0, types_1.ClusterId)(clusterId));
+            if (!client) {
+                throw new Error(`Cluster 0x${clusterId.toString(16)} not found on endpoint ${endpointId} of node ${nodeIdStr}`);
+            }
+            const attrClient = client.attributes[attributeName];
+            if (!attrClient) {
+                throw new Error(`Attribute "${attributeName}" not found in cluster 0x${clusterId.toString(16)}`);
+            }
+            // false = read from local cache populated by subscription, no network round trip
+            return await attrClient.get(false);
         }
-        const attrClient = client.attributes[attributeName];
-        if (!attrClient) {
-            throw new Error(`Attribute "${attributeName}" not found in cluster 0x${clusterId.toString(16)}`);
+        finally {
+            await this.releaseIfTransient(nodeIdStr, node);
         }
-        // false = read from local cache populated by subscription, no network round trip
-        return await attrClient.get(false);
     }
     /**
      * Read Thread diagnostics from ThreadNetworkDiagnostics (cluster 0x0035, endpoint 0).
@@ -460,53 +482,58 @@ class ControllerManager {
      */
     async readSignalStrength(nodeIdStr) {
         const node = await this.getOrConnectNode(nodeIdStr, false);
-        const ep0 = node.getDeviceById((0, types_1.EndpointNumber)(0));
-        const threadClient = ep0?.getClusterClientById((0, types_1.ClusterId)(0x0035));
-        if (!threadClient)
-            return { type: 'unknown', level: 'unknown' };
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const readAttr = async (name) => {
-            if (!threadClient.attributes[name])
-                return undefined;
-            // get(false) = read from local subscription cache, zero network I/O
-            try {
-                return await threadClient.attributes[name].get(false);
-            }
-            catch {
-                return undefined;
-            }
-        };
-        const [neighborTable, detachedCount, parentChanges, attachAttempts] = await Promise.all([
-            readAttr('neighborTable'),
-            readAttr('detachedRoleCount'),
-            readAttr('parentChangeCount'),
-            readAttr('attachAttemptCount'),
-        ]);
-        let minRssi;
-        let avgLqi;
-        let neighborCount;
-        if (Array.isArray(neighborTable) && neighborTable.length > 0) {
-            neighborCount = neighborTable.length;
+        try {
+            const ep0 = node.getDeviceById((0, types_1.EndpointNumber)(0));
+            const threadClient = ep0?.getClusterClientById((0, types_1.ClusterId)(0x0035));
+            if (!threadClient)
+                return { type: 'unknown', level: 'unknown' };
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            const rssis = neighborTable.map((n) => n.averageRssi ?? n.lastRssi).filter((r) => typeof r === 'number');
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            const lqis = neighborTable.map((n) => n.lqi).filter((l) => typeof l === 'number');
-            minRssi = rssis.length ? Math.min(...rssis) : undefined;
-            avgLqi = lqis.length ? Math.round(lqis.reduce((a, b) => a + b, 0) / lqis.length) : undefined;
+            const readAttr = async (name) => {
+                if (!threadClient.attributes[name])
+                    return undefined;
+                // get(false) = read from local subscription cache, zero network I/O
+                try {
+                    return await threadClient.attributes[name].get(false);
+                }
+                catch {
+                    return undefined;
+                }
+            };
+            const [neighborTable, detachedCount, parentChanges, attachAttempts] = await Promise.all([
+                readAttr('neighborTable'),
+                readAttr('detachedRoleCount'),
+                readAttr('parentChangeCount'),
+                readAttr('attachAttemptCount'),
+            ]);
+            let minRssi;
+            let avgLqi;
+            let neighborCount;
+            if (Array.isArray(neighborTable) && neighborTable.length > 0) {
+                neighborCount = neighborTable.length;
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                const rssis = neighborTable.map((n) => n.averageRssi ?? n.lastRssi).filter((r) => typeof r === 'number');
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                const lqis = neighborTable.map((n) => n.lqi).filter((l) => typeof l === 'number');
+                minRssi = rssis.length ? Math.min(...rssis) : undefined;
+                avgLqi = lqis.length ? Math.round(lqis.reduce((a, b) => a + b, 0) / lqis.length) : undefined;
+            }
+            const level = minRssi !== undefined
+                ? (minRssi >= -70 ? 'good' : minRssi >= -85 ? 'fair' : 'poor')
+                : (avgLqi !== undefined ? (avgLqi >= 180 ? 'good' : avgLqi >= 100 ? 'fair' : 'poor') : 'unknown');
+            return {
+                type: 'Thread',
+                rssi: minRssi,
+                lqi: avgLqi,
+                neighborCount,
+                detachedCount: typeof detachedCount === 'number' ? detachedCount : undefined,
+                parentChanges: typeof parentChanges === 'number' ? parentChanges : undefined,
+                attachAttempts: typeof attachAttempts === 'number' ? attachAttempts : undefined,
+                level,
+            };
         }
-        const level = minRssi !== undefined
-            ? (minRssi >= -70 ? 'good' : minRssi >= -85 ? 'fair' : 'poor')
-            : (avgLqi !== undefined ? (avgLqi >= 180 ? 'good' : avgLqi >= 100 ? 'fair' : 'poor') : 'unknown');
-        return {
-            type: 'Thread',
-            rssi: minRssi,
-            lqi: avgLqi,
-            neighborCount,
-            detachedCount: typeof detachedCount === 'number' ? detachedCount : undefined,
-            parentChanges: typeof parentChanges === 'number' ? parentChanges : undefined,
-            attachAttempts: typeof attachAttempts === 'number' ? attachAttempts : undefined,
-            level,
-        };
+        finally {
+            await this.releaseIfTransient(nodeIdStr, node);
+        }
     }
     /**
      * Discover all endpoints and clusters of a commissioned node.
@@ -533,7 +560,6 @@ class ControllerManager {
             const clusters = [];
             for (const client of device.getAllClusterClients()) {
                 const clusterId = client.id;
-                const isNamed = (k) => isNaN(Number(k));
                 const attributes = Object.keys(client.attributes).filter(isNamed);
                 const commands = Object.keys(client.commands).filter(isNamed);
                 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -669,11 +695,19 @@ class ControllerManager {
         const evtHandlers = this.eventHandlers.get(nodeIdStr);
         const attrFilters = this.attrHandlerFilters.get(nodeIdStr);
         const evtFilters = this.eventHandlerFilters.get(nodeIdStr);
-        const attrOk = !attrHandlers?.size ||
-            [...attrHandlers].every(h => attrFilters?.get(h)?.clusterId !== undefined);
-        const evtOk = !evtHandlers?.size ||
-            [...evtHandlers].every(h => evtFilters?.get(h)?.clusterId !== undefined);
-        return attrOk && evtOk;
+        if (attrHandlers?.size) {
+            for (const h of attrHandlers) {
+                if (attrFilters?.get(h)?.clusterId === undefined)
+                    return false;
+            }
+        }
+        if (evtHandlers?.size) {
+            for (const h of evtHandlers) {
+                if (evtFilters?.get(h)?.clusterId === undefined)
+                    return false;
+            }
+        }
+        return true;
     }
     /**
      * Selective subscription using InteractionClient.subscribeMultipleAttributesAndEvents().
@@ -716,7 +750,58 @@ class ControllerManager {
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
             clusterId: (0, types_1.ClusterId)(clusterId),
         }));
-        const attrListener = (data) => {
+        try {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            await interactionClient.subscribeMultipleAttributesAndEvents({
+                attributes: attributePaths,
+                events: eventPaths,
+                minIntervalFloorSeconds: 30,
+                maxIntervalCeilingSeconds: 300,
+                attributeListener: this.makeAttrListener(nodeIdStr),
+                eventListener: this.makeEvtListener(nodeIdStr),
+            });
+            this.setupStateHandler(nodeIdStr, node);
+            logger.info(`Selectively subscribed to clusters [${[...attrClusterIds].map(c => '0x' + c.toString(16)).join(', ')}] for node ${nodeIdStr}`);
+        }
+        catch (e) {
+            logger.warn(`Selective subscription failed for node ${nodeIdStr}, falling back to full: ${e}`);
+            await this.activateFullSubscription(nodeIdStr, node);
+        }
+    }
+    /**
+     * Subscribes to all attributes and events on the device.
+     *
+     * NOTE: In matter.js 0.17, `subscribeAllAttributesAndEvents()` ignores passed
+     * callbacks and does nothing when `autoSubscribe=false` (the underscore prefix
+     * on `_options` marks the parameter as intentionally unused). We therefore use
+     * `subscribeMultipleAttributesAndEvents` with wildcard paths (empty objects =
+     * all endpoints/clusters) so the same proven code path handles both modes.
+     */
+    async activateFullSubscription(nodeIdStr, node) {
+        // getInteractionClient() returns the private field set at construction time
+        // and never throws. We intentionally let any unexpected error propagate so
+        // the caller does NOT mark subscribed=true on failure.
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const interactionClient = node.getInteractionClient();
+        await interactionClient.subscribeMultipleAttributesAndEvents({
+            attributes: [{}], // wildcard — all attributes on all endpoints/clusters
+            events: [{}], // wildcard — all events
+            minIntervalFloorSeconds: 30,
+            maxIntervalCeilingSeconds: 300,
+            attributeListener: this.makeAttrListener(nodeIdStr),
+            eventListener: this.makeEvtListener(nodeIdStr),
+        });
+        this.setupStateHandler(nodeIdStr, node);
+        logger.info(`Subscribed to all attributes and events for node ${nodeIdStr}`);
+    }
+    /**
+     * Builds the attribute-change dispatcher closure for `nodeIdStr`.
+     * Extracted so both selective and full subscription paths share identical logic.
+     * The returned function is stored by the matter.js subscription and lives for
+     * the connection lifetime — no per-event allocation beyond the event object itself.
+     */
+    makeAttrListener(nodeIdStr) {
+        return (data) => {
             const handlers = this.attrHandlers.get(nodeIdStr);
             if (!handlers?.size)
                 return;
@@ -746,7 +831,13 @@ class ControllerManager {
                 catch { /* keep other handlers running */ }
             }
         };
-        const evtListener = (data) => {
+    }
+    /**
+     * Builds the event-triggered dispatcher closure for `nodeIdStr`.
+     * Extracted so both selective and full subscription paths share identical logic.
+     */
+    makeEvtListener(nodeIdStr) {
+        return (data) => {
             const handlers = this.eventHandlers.get(nodeIdStr);
             if (!handlers?.size)
                 return;
@@ -757,7 +848,7 @@ class ControllerManager {
                 clusterId: data.path.clusterId,
                 clusterName: CLUSTER_NAMES[data.path.clusterId] ?? `0x${data.path.clusterId.toString(16).toUpperCase().padStart(4, '0')}`,
                 eventName: data.path.eventName,
-                events: [...data.events],
+                events: [...data.events], // shallow copy — guard against SDK buffer reuse
                 timestamp: new Date().toISOString(),
             };
             for (const h of handlers) {
@@ -776,99 +867,6 @@ class ControllerManager {
                 catch { /* keep other handlers running */ }
             }
         };
-        try {
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            await interactionClient.subscribeMultipleAttributesAndEvents({
-                attributes: attributePaths,
-                events: eventPaths,
-                minIntervalFloorSeconds: 30,
-                maxIntervalCeilingSeconds: 300,
-                attributeListener: attrListener,
-                eventListener: evtListener,
-            });
-            this.setupStateHandler(nodeIdStr, node);
-            logger.info(`Selectively subscribed to clusters [${[...attrClusterIds].map(c => '0x' + c.toString(16)).join(', ')}] for node ${nodeIdStr}`);
-        }
-        catch (e) {
-            logger.warn(`Selective subscription failed for node ${nodeIdStr}, falling back to full: ${e}`);
-            await this.activateFullSubscription(nodeIdStr, node);
-        }
-    }
-    /**
-     * Subscribes to all attributes and events on the device via
-     * `subscribeAllAttributesAndEvents` — the only matter.js v0.16 API that
-     * reliably delivers ongoing device-pushed reports.
-     *
-     * Handlers registered with a SubscriptionFilter are dispatched only when
-     * the incoming event matches their filter (clusterId / endpointId /
-     * attributeName / eventName). Handlers without a filter receive everything.
-     */
-    async activateFullSubscription(nodeIdStr, node) {
-        await node.subscribeAllAttributesAndEvents({
-            ignoreInitialTriggers: true,
-            attributeChangedCallback: (data) => {
-                const handlers = this.attrHandlers.get(nodeIdStr);
-                if (!handlers?.size)
-                    return;
-                const filters = this.attrHandlerFilters.get(nodeIdStr);
-                const event = {
-                    nodeId: nodeIdStr,
-                    endpointId: data.path.endpointId,
-                    clusterId: data.path.clusterId,
-                    clusterName: CLUSTER_NAMES[data.path.clusterId] ?? `0x${data.path.clusterId.toString(16).toUpperCase().padStart(4, '0')}`,
-                    attributeName: data.path.attributeName,
-                    value: data.value,
-                    timestamp: new Date().toISOString(),
-                };
-                for (const h of handlers) {
-                    const f = filters?.get(h);
-                    if (f) {
-                        if (f.clusterId !== undefined && f.clusterId !== data.path.clusterId)
-                            continue;
-                        if (f.endpointId !== undefined && f.endpointId !== data.path.endpointId)
-                            continue;
-                        if (f.attributeName !== undefined && f.attributeName !== data.path.attributeName)
-                            continue;
-                    }
-                    try {
-                        h(event);
-                    }
-                    catch { /* keep other handlers running */ }
-                }
-            },
-            eventTriggeredCallback: (data) => {
-                const handlers = this.eventHandlers.get(nodeIdStr);
-                if (!handlers?.size)
-                    return;
-                const filters = this.eventHandlerFilters.get(nodeIdStr);
-                const event = {
-                    nodeId: nodeIdStr,
-                    endpointId: data.path.endpointId,
-                    clusterId: data.path.clusterId,
-                    clusterName: CLUSTER_NAMES[data.path.clusterId] ?? `0x${data.path.clusterId.toString(16).toUpperCase().padStart(4, '0')}`,
-                    eventName: data.path.eventName,
-                    events: [...data.events],
-                    timestamp: new Date().toISOString(),
-                };
-                for (const h of handlers) {
-                    const f = filters?.get(h);
-                    if (f) {
-                        if (f.clusterId !== undefined && f.clusterId !== data.path.clusterId)
-                            continue;
-                        if (f.endpointId !== undefined && f.endpointId !== data.path.endpointId)
-                            continue;
-                        if (f.eventName !== undefined && f.eventName !== data.path.eventName)
-                            continue;
-                    }
-                    try {
-                        h(event);
-                    }
-                    catch { /* keep other handlers running */ }
-                }
-            },
-        });
-        this.setupStateHandler(nodeIdStr, node);
-        logger.info(`Subscribed to all attributes and events for node ${nodeIdStr}`);
     }
     /**
      * Attach the stateChanged listener that re-subscribes on reconnect.
@@ -896,9 +894,7 @@ class ControllerManager {
             }
             else if (state === device_1.NodeStates.Connected && wasDisconnected) {
                 wasDisconnected = false;
-                const hasHandlers = (this.attrHandlers.get(nodeIdStr)?.size ?? 0) > 0 ||
-                    (this.eventHandlers.get(nodeIdStr)?.size ?? 0) > 0;
-                if (hasHandlers) {
+                if (this.hasActiveHandlers(nodeIdStr)) {
                     logger.info(`Node ${nodeIdStr} reconnected — re-subscribing to attributes and events`);
                     this.ensureSubscribed(nodeIdStr).catch(e => logger.warn(`Re-subscribe after reconnect failed for ${nodeIdStr}: ${e}`));
                 }
@@ -907,7 +903,7 @@ class ControllerManager {
         node.events.stateChanged.on(stateHandler);
         this.stateHandlers.set(nodeIdStr, stateHandler);
     }
-    // ----------- Device registry -------------------------------------------
+    // ----------- Private helpers (registry & storage) -----------------------
     /**
      * Deletes storage cache files that belong to nodeIds which are no longer in
      * the registry (decommissioned devices). Called once at startup before
@@ -942,7 +938,7 @@ class ControllerManager {
         await Promise.all(toDelete.map(f => (0, promises_1.unlink)((0, node_path_1.join)(storageDir, f)).catch(() => { })));
         logger.info(`Cleaned ${toDelete.length} stale cache file(s) for ${staleIds.size} decommissioned node(s): ${[...staleIds].join(", ")}`);
     }
-    // ----------- Device registry -------------------------------------------
+    // ----------- Device registry (public API) --------------------------------
     /**
      * Returns the persisted registry of commissioned devices with their discovery data.
      * Used by the Node-RED admin UI to populate cascading dropdowns.
@@ -1017,8 +1013,7 @@ class ControllerManager {
             this.stateHandlers.delete(nodeIdStr);
             this.connectedNodes.delete(nodeIdStr);
             this.subscribingPromises.delete(nodeIdStr);
-            const hasHandlers = (this.attrHandlers.get(nodeIdStr)?.size ?? 0) > 0 ||
-                (this.eventHandlers.get(nodeIdStr)?.size ?? 0) > 0;
+            const hasHandlers = this.hasActiveHandlers(nodeIdStr);
             try {
                 // withSubscription=true re-subscribes nodes that had active handlers;
                 // withSubscription=false just re-establishes the connection.
@@ -1073,7 +1068,6 @@ class ControllerManager {
             const data = (0, node_fs_1.readFileSync)(this.registryPath, "utf8");
             this.registry = JSON.parse(data);
             // Migrate: strip pure-numeric attribute/command/event keys left by older versions
-            const isNamed = (k) => isNaN(Number(k));
             let migrated = false;
             for (const entry of Object.values(this.registry)) {
                 for (const ep of entry.discovery?.endpoints ?? []) {
@@ -1103,14 +1097,6 @@ class ControllerManager {
         // Async write — never blocks the event loop (critical on Pi with slow SD card).
         (0, promises_1.writeFile)(this.registryPath, JSON.stringify(this.registry), "utf8")
             .catch(e => logger.warn(`Failed to save device registry: ${e}`));
-    }
-    buildNodeInfo(node) {
-        const devices = node.getDevices();
-        const endpoints = devices.map(device => ({
-            endpointId: device.number ?? 0,
-            clusterIds: [],
-        }));
-        return { nodeId: node.nodeId.toString(), endpoints };
     }
     getOrCreateHandlerSet(map, key) {
         if (!map.has(key))

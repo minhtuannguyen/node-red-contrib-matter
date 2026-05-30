@@ -2,11 +2,8 @@
  * ControllerManager — wraps the matter.js CommissioningController in a
  * Node-RED-friendly singleton (one per storage path).
  *
- * @matter/nodejs is required lazily inside _doStart() so that Boot.init fires
- * after environment configuration. The SQLite storage driver is loaded from
- * the compiled CJS path directly (bypassing the broken "#storage" import alias
- * in @matter/nodejs@0.17.0) and re-registered on StorageService via the public
- * registerDriver() API.
+ * @matter/nodejs is loaded lazily inside _doStart() so that Boot.init fires
+ * after environment configuration is applied.
  */
 import type { PairedNode } from "@project-chip/matter.js/device";
 export interface ClusterInfo {
@@ -111,9 +108,9 @@ export declare class ControllerManager {
     private readonly attrHandlerFilters;
     private readonly eventHandlerFilters;
     /**
-     * Per-node subscription lock. If subscribeAllAttributesAndEvents() is already
-     * in progress for a node, concurrent callers await the same promise instead of
-     * each sending their own Subscribe Request to the device.
+     * Per-node subscription lock. If a subscription is already in progress for a
+     * node, concurrent callers await the same promise instead of each sending
+     * their own Subscribe Request to the device.
      */
     private readonly subscribingPromises;
     /**
@@ -233,15 +230,27 @@ export declare class ControllerManager {
      */
     private activateSelectiveSubscription;
     /**
-     * Subscribes to all attributes and events on the device via
-     * `subscribeAllAttributesAndEvents` — the only matter.js v0.16 API that
-     * reliably delivers ongoing device-pushed reports.
+     * Subscribes to all attributes and events on the device.
      *
-     * Handlers registered with a SubscriptionFilter are dispatched only when
-     * the incoming event matches their filter (clusterId / endpointId /
-     * attributeName / eventName). Handlers without a filter receive everything.
+     * NOTE: In matter.js 0.17, `subscribeAllAttributesAndEvents()` ignores passed
+     * callbacks and does nothing when `autoSubscribe=false` (the underscore prefix
+     * on `_options` marks the parameter as intentionally unused). We therefore use
+     * `subscribeMultipleAttributesAndEvents` with wildcard paths (empty objects =
+     * all endpoints/clusters) so the same proven code path handles both modes.
      */
     private activateFullSubscription;
+    /**
+     * Builds the attribute-change dispatcher closure for `nodeIdStr`.
+     * Extracted so both selective and full subscription paths share identical logic.
+     * The returned function is stored by the matter.js subscription and lives for
+     * the connection lifetime — no per-event allocation beyond the event object itself.
+     */
+    private makeAttrListener;
+    /**
+     * Builds the event-triggered dispatcher closure for `nodeIdStr`.
+     * Extracted so both selective and full subscription paths share identical logic.
+     */
+    private makeEvtListener;
     /**
      * Attach the stateChanged listener that re-subscribes on reconnect.
      * Extracted so both full and selective subscription paths share the same logic.
@@ -295,7 +304,6 @@ export declare class ControllerManager {
     registerDevice(nodeIdStr: string, labelOverride?: string): Promise<void>;
     private loadRegistry;
     private saveRegistry;
-    private buildNodeInfo;
     private getOrCreateHandlerSet;
 }
 //# sourceMappingURL=controller-manager.d.ts.map

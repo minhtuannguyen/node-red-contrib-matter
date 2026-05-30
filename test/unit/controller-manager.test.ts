@@ -66,10 +66,17 @@ interface MockPairedNode {
     stateChanged: MockStateChangedObservable;
   };
   nodeId: bigint;
+  getInteractionClient: jest.Mock;
   subscribeAllAttributesAndEvents: jest.Mock;
   getRootEndpoint: jest.Mock;
   getDevices: jest.Mock;
   getDeviceById: jest.Mock;
+  /** Test helper: fire a captured attributeListener */ 
+  _fireAttr: (data: unknown) => void;
+  /** Test helper: fire a captured eventListener */
+  _fireEvt: (data: unknown) => void;
+  /** The subscribeMultipleAttributesAndEvents mock on the interaction client */
+  _subscribeMultiple: jest.Mock;
 }
 
 function makePairedNode(overrides: Partial<MockPairedNode> = {}): MockPairedNode {
@@ -79,16 +86,34 @@ function makePairedNode(overrides: Partial<MockPairedNode> = {}): MockPairedNode
     off:   jest.fn((h: (s: number) => void) => listeners.delete(h)),
     _emit: (state: number) => { for (const h of listeners) h(state); },
   };
+
+  // Captures the listeners passed to subscribeMultipleAttributesAndEvents so
+  // tests can fire synthetic attribute/event updates without a real network.
+  let _capturedAttrListener: ((d: unknown) => void) | undefined;
+  let _capturedEvtListener:  ((d: unknown) => void) | undefined;
+  const _subscribeMultiple = jest.fn().mockImplementation(
+    (opts: { attributeListener?: (d: unknown) => void; eventListener?: (d: unknown) => void }) => {
+      if (opts.attributeListener) _capturedAttrListener = opts.attributeListener;
+      if (opts.eventListener)     _capturedEvtListener  = opts.eventListener;
+      return Promise.resolve();
+    },
+  );
+  const interactionClient = { subscribeMultipleAttributesAndEvents: _subscribeMultiple };
+
   return {
     initialized: true,
     events: { initialized: Promise.resolve(), stateChanged },
     nodeId: BigInt(12345),
+    getInteractionClient: jest.fn().mockReturnValue(interactionClient),
     subscribeAllAttributesAndEvents: jest.fn().mockResolvedValue(undefined),
     getRootEndpoint: jest.fn().mockReturnValue({
       getClusterClientById: jest.fn().mockReturnValue(null),
     }),
     getDevices:    jest.fn().mockReturnValue([]),
     getDeviceById: jest.fn().mockReturnValue(null),
+    _fireAttr: (d: unknown) => _capturedAttrListener?.(d),
+    _fireEvt:  (d: unknown) => _capturedEvtListener?.(d),
+    _subscribeMultiple,
     ...overrides,
   };
 }
@@ -324,20 +349,13 @@ describe("addAttributeHandler() / removeAttributeHandler()", () => {
     await m.start();
 
     const pairedNode = makePairedNode();
-    let capturedAttrCb: ((data: unknown) => void) | undefined;
-    pairedNode.subscribeAllAttributesAndEvents = jest.fn().mockImplementation(
-      (opts: { attributeChangedCallback: (d: unknown) => void }) => {
-        capturedAttrCb = opts.attributeChangedCallback;
-        return Promise.resolve();
-      },
-    );
     mockConnectNode = jest.fn().mockResolvedValue(pairedNode);
 
     const handler = jest.fn();
     await m.addAttributeHandler("12345", handler);
 
     // Simulate attribute change arriving from the device
-    capturedAttrCb!({
+    pairedNode._fireAttr({
       path: { endpointId: 1, clusterId: 6, attributeName: "onOff" },
       value: true,
     });
@@ -357,20 +375,13 @@ describe("addAttributeHandler() / removeAttributeHandler()", () => {
     await m.start();
 
     const pairedNode = makePairedNode();
-    let capturedAttrCb: ((data: unknown) => void) | undefined;
-    pairedNode.subscribeAllAttributesAndEvents = jest.fn().mockImplementation(
-      (opts: { attributeChangedCallback: (d: unknown) => void }) => {
-        capturedAttrCb = opts.attributeChangedCallback;
-        return Promise.resolve();
-      },
-    );
     mockConnectNode = jest.fn().mockResolvedValue(pairedNode);
 
     const handler = jest.fn();
     await m.addAttributeHandler("12345", handler);
     m.removeAttributeHandler("12345", handler);
 
-    capturedAttrCb!({
+    pairedNode._fireAttr({
       path: { endpointId: 1, clusterId: 6, attributeName: "onOff" },
       value: false,
     });
@@ -385,19 +396,12 @@ describe("addEventHandler() / removeEventHandler()", () => {
     await m.start();
 
     const pairedNode = makePairedNode();
-    let capturedEvtCb: ((data: unknown) => void) | undefined;
-    pairedNode.subscribeAllAttributesAndEvents = jest.fn().mockImplementation(
-      (opts: { eventTriggeredCallback: (d: unknown) => void }) => {
-        capturedEvtCb = opts.eventTriggeredCallback;
-        return Promise.resolve();
-      },
-    );
     mockConnectNode = jest.fn().mockResolvedValue(pairedNode);
 
     const handler = jest.fn();
     await m.addEventHandler("12345", handler);
 
-    capturedEvtCb!({
+    pairedNode._fireEvt({
       path: { endpointId: 1, clusterId: 0x0101, eventName: "DoorLockAlarm" },
       events: [{ alarmCode: 0 }],
     });
@@ -414,20 +418,13 @@ describe("addEventHandler() / removeEventHandler()", () => {
     await m.start();
 
     const pairedNode = makePairedNode();
-    let capturedEvtCb: ((data: unknown) => void) | undefined;
-    pairedNode.subscribeAllAttributesAndEvents = jest.fn().mockImplementation(
-      (opts: { eventTriggeredCallback: (d: unknown) => void }) => {
-        capturedEvtCb = opts.eventTriggeredCallback;
-        return Promise.resolve();
-      },
-    );
     mockConnectNode = jest.fn().mockResolvedValue(pairedNode);
 
     const handler = jest.fn();
     await m.addEventHandler("12345", handler);
     m.removeEventHandler("12345", handler);
 
-    capturedEvtCb!({
+    pairedNode._fireEvt({
       path: { endpointId: 1, clusterId: 0x0101, eventName: "DoorLockAlarm" },
       events: [],
     });
@@ -441,14 +438,14 @@ describe("addEventHandler() / removeEventHandler()", () => {
 // ---------------------------------------------------------------------------
 
 describe("ensureSubscribed() subscription lock", () => {
-  it("calls subscribeAllAttributesAndEvents exactly once for concurrent handlers on the same node", async () => {
+  it("calls subscribeMultipleAttributesAndEvents exactly once for concurrent handlers on the same node", async () => {
     const m = ControllerManager.getInstance(STORAGE_A, 5540);
     await m.start();
 
     const pairedNode = makePairedNode();
-    // subscribeAllAttributesAndEvents deferred — simulates slow device
+    // subscribeMultipleAttributesAndEvents deferred — simulates slow device
     let resolveSubscribe!: () => void;
-    pairedNode.subscribeAllAttributesAndEvents = jest.fn().mockReturnValue(
+    pairedNode._subscribeMultiple.mockReturnValue(
       new Promise<void>((resolve) => { resolveSubscribe = resolve; }),
     );
     mockConnectNode = jest.fn().mockResolvedValue(pairedNode);
@@ -462,7 +459,7 @@ describe("ensureSubscribed() subscription lock", () => {
     resolveSubscribe();
     await Promise.all([p1, p2]);
 
-    expect(pairedNode.subscribeAllAttributesAndEvents).toHaveBeenCalledTimes(1);
+    expect(pairedNode._subscribeMultiple).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -476,18 +473,11 @@ describe("event timestamps", () => {
     await m.start();
 
     const pairedNode = makePairedNode();
-    let cb!: (d: unknown) => void;
-    pairedNode.subscribeAllAttributesAndEvents = jest.fn().mockImplementation(
-      (opts: { attributeChangedCallback: (d: unknown) => void }) => {
-        cb = opts.attributeChangedCallback;
-        return Promise.resolve();
-      },
-    );
     mockConnectNode = jest.fn().mockResolvedValue(pairedNode);
 
     const handler = jest.fn();
     await m.addAttributeHandler("12345", handler);
-    cb({ path: { endpointId: 1, clusterId: 6, attributeName: "onOff" }, value: true });
+    pairedNode._fireAttr({ path: { endpointId: 1, clusterId: 6, attributeName: "onOff" }, value: true });
 
     const event = handler.mock.calls[0][0] as { timestamp: unknown };
     expect(typeof event.timestamp).toBe("string");
@@ -555,17 +545,10 @@ const NS = { Connected: 0, Disconnected: 1, Reconnecting: 2 };
 describe("Re-subscription after device reconnect", () => {
   function makeReconnectableNode() {
     const pairedNode = makePairedNode();
-    let capturedAttrCb: ((data: unknown) => void) | undefined;
-    pairedNode.subscribeAllAttributesAndEvents = jest.fn().mockImplementation(
-      (opts: { attributeChangedCallback: (d: unknown) => void }) => {
-        capturedAttrCb = opts.attributeChangedCallback;
-        return Promise.resolve();
-      },
-    );
-    return { pairedNode, getAttrCb: () => capturedAttrCb };
+    return { pairedNode };
   }
 
-  it("re-calls subscribeAllAttributesAndEvents after Disconnected → Connected", async () => {
+  it("re-calls subscribeMultipleAttributesAndEvents after Disconnected → Connected", async () => {
     const m = ControllerManager.getInstance(STORAGE_A, 5540);
     await m.start();
 
@@ -573,7 +556,7 @@ describe("Re-subscription after device reconnect", () => {
     mockConnectNode = jest.fn().mockResolvedValue(pairedNode);
 
     await m.addAttributeHandler("12345", jest.fn());
-    expect(pairedNode.subscribeAllAttributesAndEvents).toHaveBeenCalledTimes(1);
+    expect(pairedNode._subscribeMultiple).toHaveBeenCalledTimes(1);
 
     // Device goes offline
     pairedNode.events.stateChanged._emit(NS.Disconnected);
@@ -581,21 +564,21 @@ describe("Re-subscription after device reconnect", () => {
     pairedNode.events.stateChanged._emit(NS.Connected);
     await new Promise((r) => setImmediate(r));
 
-    expect(pairedNode.subscribeAllAttributesAndEvents).toHaveBeenCalledTimes(2);
+    expect(pairedNode._subscribeMultiple).toHaveBeenCalledTimes(2);
   });
 
   it("attribute events flow again after re-subscription", async () => {
     const m = ControllerManager.getInstance(STORAGE_A, 5540);
     await m.start();
 
-    const { pairedNode, getAttrCb } = makeReconnectableNode();
+    const pairedNode = makePairedNode();
     mockConnectNode = jest.fn().mockResolvedValue(pairedNode);
 
     const handler = jest.fn();
     await m.addAttributeHandler("12345", handler);
 
     // Fire event before disconnect — should be received
-    getAttrCb()!({ path: { endpointId: 1, clusterId: 6, attributeName: "onOff" }, value: true });
+    pairedNode._fireAttr({ path: { endpointId: 1, clusterId: 6, attributeName: "onOff" }, value: true });
     expect(handler).toHaveBeenCalledTimes(1);
 
     // Simulate outage and reconnect
@@ -603,8 +586,8 @@ describe("Re-subscription after device reconnect", () => {
     pairedNode.events.stateChanged._emit(NS.Connected);
     await new Promise((r) => setImmediate(r));
 
-    // Fire event after reconnect — new callback captured by second subscribe call
-    getAttrCb()!({ path: { endpointId: 1, clusterId: 6, attributeName: "onOff" }, value: false });
+    // Fire event after reconnect — new listener captured by second subscribe call
+    pairedNode._fireAttr({ path: { endpointId: 1, clusterId: 6, attributeName: "onOff" }, value: false });
     expect(handler).toHaveBeenCalledTimes(2);
   });
 
@@ -625,7 +608,7 @@ describe("Re-subscription after device reconnect", () => {
     await new Promise((r) => setImmediate(r));
 
     // Still only 1 subscription (the initial one)
-    expect(pairedNode.subscribeAllAttributesAndEvents).toHaveBeenCalledTimes(1);
+    expect(pairedNode._subscribeMultiple).toHaveBeenCalledTimes(1);
   });
 
   it("Connected without prior Disconnected does not trigger re-subscription", async () => {
@@ -636,14 +619,14 @@ describe("Re-subscription after device reconnect", () => {
     mockConnectNode = jest.fn().mockResolvedValue(pairedNode);
 
     await m.addAttributeHandler("12345", jest.fn());
-    expect(pairedNode.subscribeAllAttributesAndEvents).toHaveBeenCalledTimes(1);
+    expect(pairedNode._subscribeMultiple).toHaveBeenCalledTimes(1);
 
     // Fire Connected without a prior Disconnected — wasDisconnected=false guard
     pairedNode.events.stateChanged._emit(NS.Connected);
     await new Promise((r) => setImmediate(r));
 
     // Must still be exactly 1
-    expect(pairedNode.subscribeAllAttributesAndEvents).toHaveBeenCalledTimes(1);
+    expect(pairedNode._subscribeMultiple).toHaveBeenCalledTimes(1);
   });
 
   it("registers only one stateChanged listener per node even after multiple reconnects", async () => {
@@ -691,7 +674,7 @@ describe("Re-subscription after device reconnect", () => {
     pairedNode.events.stateChanged._emit(NS.Connected);
     await new Promise((r) => setImmediate(r));
 
-    expect(pairedNode.subscribeAllAttributesAndEvents).toHaveBeenCalledTimes(2);
+    expect(pairedNode._subscribeMultiple).toHaveBeenCalledTimes(2);
   });
 });
 
