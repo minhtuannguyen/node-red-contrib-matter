@@ -1153,7 +1153,21 @@ export class ControllerManager {
         wasDisconnected = false;
         if (this.hasActiveHandlers(nodeIdStr)) {
           logger.info(`Node ${nodeIdStr} reconnected — re-subscribing to attributes and events`);
-          this.ensureSubscribed(nodeIdStr).catch(e =>
+          // Self-detach BEFORE the async reconnect so setupStateHandler() called
+          // from inside the new subscription starts with a clean stateHandlers
+          // entry (no stale prevStateHandler to .off() on the wrong PairedNode).
+          node.events.stateChanged.off(stateHandler);
+          this.stateHandlers.delete(nodeIdStr);
+          // Drop the stale PairedNode entry so getOrConnectNode() calls
+          // ctrl.connectNode() for a fresh CASE session. Thread devices often
+          // change their operational IPv6 address on reboot; reusing the cached
+          // PairedNode's InteractionClient (bound to the old session/address)
+          // causes subscribeMultipleAttributesAndEvents to silently fail or
+          // deliver no reports, leaving the node permanently unsubscribed.
+          // ctrl.connectNode() performs fresh mDNS operational discovery and
+          // establishes a new CASE session before the Subscribe Request is sent.
+          this.connectedNodes.delete(nodeIdStr);
+          this.getOrConnectNode(nodeIdStr, true).catch(e =>
             logger.warn(`Re-subscribe after reconnect failed for ${nodeIdStr}: ${e}`),
           );
         }
