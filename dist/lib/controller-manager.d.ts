@@ -108,6 +108,13 @@ export declare class ControllerManager {
     private readonly attrHandlerFilters;
     private readonly eventHandlerFilters;
     /**
+     * Per-node connection lock. If a connectNode() call is already in progress for
+     * a node, concurrent callers share the same promise instead of each starting
+     * an independent CASE session attempt (which could each take up to 30 s when
+     * the device is offline, wasting memory and network retries).
+     */
+    private readonly connectingPromises;
+    /**
      * Per-node subscription lock. If a subscription is already in progress for a
      * node, concurrent callers await the same promise instead of each sending
      * their own Subscribe Request to the device.

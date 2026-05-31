@@ -71,6 +71,7 @@ interface MockPairedNode {
   getRootEndpoint: jest.Mock;
   getDevices: jest.Mock;
   getDeviceById: jest.Mock;
+  disconnect: jest.Mock;
   /** Test helper: fire a captured attributeListener */ 
   _fireAttr: (data: unknown) => void;
   /** Test helper: fire a captured eventListener */
@@ -111,6 +112,7 @@ function makePairedNode(overrides: Partial<MockPairedNode> = {}): MockPairedNode
     }),
     getDevices:    jest.fn().mockReturnValue([]),
     getDeviceById: jest.fn().mockReturnValue(null),
+    disconnect:    jest.fn().mockResolvedValue(undefined),
     _fireAttr: (d: unknown) => _capturedAttrListener?.(d),
     _fireEvt:  (d: unknown) => _capturedEvtListener?.(d),
     _subscribeMultiple,

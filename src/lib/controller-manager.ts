@@ -106,6 +106,23 @@ const CLUSTER_NAMES: Record<number, string> = {
 /** Returns true when a string key is a named (non-numeric) property. */
 const isNamed = (k: string) => isNaN(Number(k));
 
+/**
+ * Returns a human-readable name for the given Matter cluster ID.
+ * Unknown IDs are cached so the hex-string is only formatted once per unique
+ * cluster, eliminating per-event string allocation in the subscription hot path.
+ */
+const unknownClusterNameCache = new Map<number, string>();
+function getClusterName(clusterId: number): string {
+  const known = CLUSTER_NAMES[clusterId];
+  if (known) return known;
+  let cached = unknownClusterNameCache.get(clusterId);
+  if (!cached) {
+    cached = `0x${clusterId.toString(16).toUpperCase().padStart(4, '0')}`;
+    unknownClusterNameCache.set(clusterId, cached);
+  }
+  return cached;
+}
+
 // ---------------------------------------------------------------------------
 // Public data shapes
 // ---------------------------------------------------------------------------
@@ -235,6 +252,14 @@ export class ControllerManager {
   /** nodeId -> (handler -> filter) — used for callback-level dispatch filtering */
   private readonly attrHandlerFilters = new Map<string, Map<AttributeChangeHandler, SubscriptionFilter>>();
   private readonly eventHandlerFilters = new Map<string, Map<EventTriggeredHandler, SubscriptionFilter>>();
+  /**
+   * Per-node connection lock. If a connectNode() call is already in progress for
+   * a node, concurrent callers share the same promise instead of each starting
+   * an independent CASE session attempt (which could each take up to 30 s when
+   * the device is offline, wasting memory and network retries).
+   */
+  private readonly connectingPromises = new Map<string, Promise<PairedNode>>();
+
   /**
    * Per-node subscription lock. If a subscription is already in progress for a
    * node, concurrent callers await the same promise instead of each sending
@@ -397,7 +422,15 @@ export class ControllerManager {
       },
     });
 
-    await this.controller.start();
+    try {
+      await this.controller.start();
+    } catch (e) {
+      // Clear the partially-initialised controller so the next start() attempt
+      // creates a fresh one rather than trying to reuse a broken instance that
+      // may still hold a port binding or crypto state.
+      this.controller = undefined;
+      throw e;
+    }
     this.started = true;
 
     // Recovery: if any commissioned nodes are absent from registry.json (e.g., the
@@ -444,6 +477,10 @@ export class ControllerManager {
     this.eventHandlers.clear();
     this.attrHandlerFilters.clear();
     this.eventHandlerFilters.clear();
+    // Cancel any in-flight connection / subscription promises so they don't
+    // touch the closed controller after Node-RED redeploys.
+    this.connectingPromises.clear();
+    this.subscribingPromises.clear();
     await this.controller?.close();
     this.started = false;
     ControllerManager.removeInstance(this.storagePath);
@@ -533,30 +570,48 @@ export class ControllerManager {
     const ctrl = this.requireController();
     const nodeId = NodeId(BigInt(nodeIdStr));
 
-    // Manage subscriptions explicitly — matter.js autoSubscribe sends a full
-    // subscribeAllAttributesAndEvents which we replace with selective per-cluster
-    // subscriptions where possible.
-    const connectOptions: CommissioningControllerNodeOptions = {
-      autoSubscribe: false,
-      // subscribeMinIntervalFloorSeconds / subscribeMaxIntervalCeilingSeconds
-      // are not set here: they configure NetworkClient.defaultSubscription which
-      // is only used by the built-in autoSubscribe path. Since autoSubscribe is
-      // false our manual subscribeMultipleAttributesAndEvents calls carry their
-      // own interval parameters directly.
-    };
-
-    const node = await ctrl.connectNode(nodeId, connectOptions);
-
-    // Wait for local initialization (uses previously cached data if available).
-    if (!node.initialized) {
-      await node.events.initialized;
+    // Deduplicate concurrent connect attempts for the same node. Without this,
+    // 100 messages arriving for an offline device each start an independent 30-s
+    // CASE session timeout, exhausting sockets and delaying all responses.
+    let connectWork = this.connectingPromises.get(nodeIdStr);
+    if (!connectWork) {
+      // Manage subscriptions explicitly — matter.js autoSubscribe sends a full
+      // subscribeAllAttributesAndEvents which we replace with selective per-cluster
+      // subscriptions where possible.
+      const connectOptions: CommissioningControllerNodeOptions = {
+        autoSubscribe: false,
+        // subscribeMinIntervalFloorSeconds / subscribeMaxIntervalCeilingSeconds
+        // are not set here: they configure NetworkClient.defaultSubscription which
+        // is only used by the built-in autoSubscribe path. Since autoSubscribe is
+        // false our manual subscribeMultipleAttributesAndEvents calls carry their
+        // own interval parameters directly.
+      };
+      connectWork = (async (): Promise<PairedNode> => {
+        const node = await ctrl.connectNode(nodeId, connectOptions);
+        // Wait for local initialization (uses previously cached data if available).
+        if (!node.initialized) await node.events.initialized;
+        // Guard against close() having run while we awaited the network.
+        // If started is false the controller is gone; don't populate the map
+        // with a stale entry that would be returned as "connected" on next start.
+        if (this.started) {
+          this.connectedNodes.set(nodeIdStr, { node, subscribed: false });
+        }
+        return node;
+      })().finally(() => {
+        this.connectingPromises.delete(nodeIdStr);
+      });
+      this.connectingPromises.set(nodeIdStr, connectWork);
     }
 
-    this.connectedNodes.set(nodeIdStr, { node, subscribed: false });
+    const node = await connectWork;
 
     if (withSubscription) {
       await this.activateSubscriptions(nodeIdStr, node);
-      this.connectedNodes.get(nodeIdStr)!.subscribed = true;
+      // Re-fetch from the map: close() may have cleared connectedNodes during the
+      // await above. Using ! would crash with TypeError in that race; a guarded
+      // get() makes the close-during-subscribe path a clean no-op instead.
+      const sub = this.connectedNodes.get(nodeIdStr);
+      if (sub) sub.subscribed = true;
     }
 
     return node;
@@ -699,7 +754,7 @@ export class ControllerManager {
         const rssis = (neighborTable.map((n: any) => n.averageRssi ?? n.lastRssi) as unknown[]).filter((r): r is number => typeof r === 'number');
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const lqis  = (neighborTable.map((n: any) => n.lqi) as unknown[]).filter((l): l is number => typeof l === 'number');
-        minRssi = rssis.length ? Math.min(...rssis) : undefined;
+        minRssi = rssis.length ? rssis.reduce((a, b) => (b < a ? b : a)) : undefined;
         avgLqi  = lqis.length  ? Math.round(lqis.reduce((a, b) => a + b, 0) / lqis.length) : undefined;
       }
 
@@ -791,10 +846,9 @@ export class ControllerManager {
   ): Promise<void> {
     this.getOrCreateHandlerSet(this.attrHandlers, nodeIdStr).add(handler);
     if (filter?.clusterId !== undefined) {
-      if (!this.attrHandlerFilters.has(nodeIdStr)) {
-        this.attrHandlerFilters.set(nodeIdStr, new Map());
-      }
-      this.attrHandlerFilters.get(nodeIdStr)!.set(handler, filter);
+      let filterMap = this.attrHandlerFilters.get(nodeIdStr);
+      if (!filterMap) { filterMap = new Map(); this.attrHandlerFilters.set(nodeIdStr, filterMap); }
+      filterMap.set(handler, filter);
     }
     await this.ensureSubscribed(nodeIdStr);
   }
@@ -823,10 +877,9 @@ export class ControllerManager {
   ): Promise<void> {
     this.getOrCreateHandlerSet(this.eventHandlers, nodeIdStr).add(handler);
     if (filter?.clusterId !== undefined) {
-      if (!this.eventHandlerFilters.has(nodeIdStr)) {
-        this.eventHandlerFilters.set(nodeIdStr, new Map());
-      }
-      this.eventHandlerFilters.get(nodeIdStr)!.set(handler, filter);
+      let filterMap = this.eventHandlerFilters.get(nodeIdStr);
+      if (!filterMap) { filterMap = new Map(); this.eventHandlerFilters.set(nodeIdStr, filterMap); }
+      filterMap.set(handler, filter);
     }
     await this.ensureSubscribed(nodeIdStr);
   }
@@ -1015,15 +1068,10 @@ export class ControllerManager {
       const handlers = this.attrHandlers.get(nodeIdStr);
       if (!handlers?.size) return;
       const filters = this.attrHandlerFilters.get(nodeIdStr);
-      const event: AttributeChangedEvent = {
-        nodeId: nodeIdStr,
-        endpointId: data.path.endpointId,
-        clusterId: data.path.clusterId,
-        clusterName: CLUSTER_NAMES[data.path.clusterId] ?? `0x${data.path.clusterId.toString(16).toUpperCase().padStart(4, '0')}`,
-        attributeName: data.path.attributeName,
-        value: data.value,
-        timestamp: new Date().toISOString(),
-      };
+      // Lazy: build the event object (and call new Date()) only on the first
+      // handler that passes its filter. If all handlers filter this update out
+      // — common in full-subscription mode — we skip all allocation entirely.
+      let event: AttributeChangedEvent | undefined;
       for (const h of handlers) {
         const f = filters?.get(h);
         if (f) {
@@ -1031,6 +1079,15 @@ export class ControllerManager {
           if (f.endpointId    !== undefined && f.endpointId    !== data.path.endpointId)    continue;
           if (f.attributeName !== undefined && f.attributeName !== data.path.attributeName) continue;
         }
+        event ??= {
+          nodeId: nodeIdStr,
+          endpointId: data.path.endpointId,
+          clusterId: data.path.clusterId,
+          clusterName: getClusterName(data.path.clusterId),
+          attributeName: data.path.attributeName,
+          value: data.value,
+          timestamp: new Date().toISOString(),
+        };
         try { h(event); } catch { /* keep other handlers running */ }
       }
     };
@@ -1045,15 +1102,9 @@ export class ControllerManager {
       const handlers = this.eventHandlers.get(nodeIdStr);
       if (!handlers?.size) return;
       const filters = this.eventHandlerFilters.get(nodeIdStr);
-      const event: EventTriggeredEvent = {
-        nodeId: nodeIdStr,
-        endpointId: data.path.endpointId,
-        clusterId: data.path.clusterId,
-        clusterName: CLUSTER_NAMES[data.path.clusterId] ?? `0x${data.path.clusterId.toString(16).toUpperCase().padStart(4, '0')}`,
-        eventName: data.path.eventName,
-        events: [...data.events],   // shallow copy — guard against SDK buffer reuse
-        timestamp: new Date().toISOString(),
-      };
+      // Lazy: build the event object and copy data.events only on the first
+      // handler that passes its filter, avoiding [...] allocation for filtered events.
+      let event: EventTriggeredEvent | undefined;
       for (const h of handlers) {
         const f = filters?.get(h);
         if (f) {
@@ -1061,6 +1112,15 @@ export class ControllerManager {
           if (f.endpointId !== undefined && f.endpointId !== data.path.endpointId) continue;
           if (f.eventName  !== undefined && f.eventName  !== data.path.eventName)  continue;
         }
+        event ??= {
+          nodeId: nodeIdStr,
+          endpointId: data.path.endpointId,
+          clusterId: data.path.clusterId,
+          clusterName: getClusterName(data.path.clusterId),
+          eventName: data.path.eventName,
+          events: [...data.events],   // shallow copy — guard against SDK buffer reuse
+          timestamp: new Date().toISOString(),
+        };
         try { h(event); } catch { /* keep other handlers running */ }
       }
     };
@@ -1182,6 +1242,10 @@ export class ControllerManager {
     this.eventHandlers.delete(nodeIdStr);
     this.attrHandlerFilters.delete(nodeIdStr);
     this.eventHandlerFilters.delete(nodeIdStr);
+    // Cancel any in-flight connection or subscription so it doesn't establish a
+    // live Matter session to a device that has just been decommissioned.
+    this.connectingPromises.delete(nodeIdStr);
+    this.subscribingPromises.delete(nodeIdStr);
 
     // tryDecommissioning = !force: properly removes the fabric entry on the
     // device when reachable; falls back to local-only removal on error.
@@ -1227,6 +1291,7 @@ export class ControllerManager {
       }
       this.stateHandlers.delete(nodeIdStr);
       this.connectedNodes.delete(nodeIdStr);
+      this.connectingPromises.delete(nodeIdStr);
       this.subscribingPromises.delete(nodeIdStr);
 
       const hasHandlers = this.hasActiveHandlers(nodeIdStr);
@@ -1256,29 +1321,35 @@ export class ControllerManager {
    */
   async registerDevice(nodeIdStr: string, labelOverride?: string): Promise<void> {
     const node = await this.getOrConnectNode(nodeIdStr, false);
+    try {
+      let label: string;
+      if (labelOverride && labelOverride.trim()) {
+        label = labelOverride.trim();
+      } else {
+        // Try to read productName from BasicInformation cluster (cluster 0x0028).
+        label = "Device";
+        try {
+          const rootEp = node.getRootEndpoint();
+          const biClient = rootEp?.getClusterClientById(ClusterId(0x0028));
+          if (biClient?.attributes?.["productName"]) {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const name = await (biClient.attributes["productName"] as any).get(false);
+            if (name) label = String(name);
+          }
+        } catch { /* fall back to default label */ }
+      }
 
-    let label: string;
-    if (labelOverride && labelOverride.trim()) {
-      label = labelOverride.trim();
-    } else {
-      // Try to read productName from BasicInformation cluster (cluster 0x0028).
-      label = "Device";
-      try {
-        const rootEp = node.getRootEndpoint();
-        const biClient = rootEp?.getClusterClientById(ClusterId(0x0028));
-        if (biClient?.attributes?.["productName"]) {
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const name = await (biClient.attributes["productName"] as any).get(false);
-          if (name) label = String(name);
-        }
-      } catch { /* fall back to default label */ }
+      // Reuse the already-connected node — avoids a second getOrConnectNode call.
+      const discovery = this.buildDiscovery(nodeIdStr, node);
+      this.registry[nodeIdStr] = { label, nodeId: nodeIdStr, discoveredAt: new Date().toISOString(), discovery };
+      this.saveRegistry();
+      logger.info(`Registered device ${nodeIdStr} as "${label}"`);
+    } finally {
+      // Release the CASE session if no subscription handler is active for this
+      // node. Without this, commission() and rediscoverAll() leave a live
+      // connection open in RAM indefinitely even when no flow subscribes to it.
+      await this.releaseIfTransient(nodeIdStr, node);
     }
-
-    // Reuse the already-connected node — avoids a second getOrConnectNode call.
-    const discovery = this.buildDiscovery(nodeIdStr, node);
-    this.registry[nodeIdStr] = { label, nodeId: nodeIdStr, discoveredAt: new Date().toISOString(), discovery };
-    this.saveRegistry();
-    logger.info(`Registered device ${nodeIdStr} as "${label}"`);
   }
 
   private loadRegistry(): void {
@@ -1320,7 +1391,8 @@ export class ControllerManager {
     map: Map<string, Set<T>>,
     key: string,
   ): Set<T> {
-    if (!map.has(key)) map.set(key, new Set());
-    return map.get(key)!;
+    let set = map.get(key);
+    if (!set) { set = new Set<T>(); map.set(key, set); }
+    return set;
   }
 }
