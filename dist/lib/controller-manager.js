@@ -822,6 +822,7 @@ class ControllerManager {
                 maxIntervalCeilingSeconds: 300,
                 attributeListener: this.makeAttrListener(nodeIdStr),
                 eventListener: this.makeEvtListener(nodeIdStr),
+                updateTimeoutHandler: this.makeUpdateTimeoutHandler(nodeIdStr),
             });
             this.setupStateHandler(nodeIdStr, node);
             logger.info(`Selectively subscribed to clusters [${[...attrClusterIds].map(c => '0x' + c.toString(16)).join(', ')}] for node ${nodeIdStr}`);
@@ -853,9 +854,39 @@ class ControllerManager {
             maxIntervalCeilingSeconds: 300,
             attributeListener: this.makeAttrListener(nodeIdStr),
             eventListener: this.makeEvtListener(nodeIdStr),
+            updateTimeoutHandler: this.makeUpdateTimeoutHandler(nodeIdStr),
         });
         this.setupStateHandler(nodeIdStr, node);
         logger.info(`Subscribed to all attributes and events for node ${nodeIdStr}`);
+    }
+    /**
+     * Returns a callback for matter.js `updateTimeoutHandler`. This fires when
+     * the device stops sending reports within `maxIntervalCeiling` seconds —
+     * a silent subscription death that does NOT trigger `stateChanged`. Without
+     * this handler, events simply stop arriving with no error logged anywhere.
+     *
+     * On timeout we drop the cached node entry and reconnect, mirroring the
+     * logic already used for an explicit Disconnected → Connected cycle.
+     */
+    makeUpdateTimeoutHandler(nodeIdStr) {
+        return () => {
+            logger.warn(`Subscription heartbeat timed out for node ${nodeIdStr} — resubscribing`);
+            const entry = this.connectedNodes.get(nodeIdStr);
+            if (!entry)
+                return;
+            // Detach the stateChanged listener so setupStateHandler() on the next
+            // activateSubscriptions() call starts clean.
+            const prevStateHandler = this.stateHandlers.get(nodeIdStr);
+            if (prevStateHandler) {
+                entry.node.events.stateChanged.off(prevStateHandler);
+                this.stateHandlers.delete(nodeIdStr);
+            }
+            // Drop the stale entry so getOrConnectNode() opens a fresh CASE session.
+            this.connectedNodes.delete(nodeIdStr);
+            if (this.hasActiveHandlers(nodeIdStr)) {
+                this.getOrConnectNode(nodeIdStr, true).catch(e => logger.warn(`Re-subscribe after timeout failed for ${nodeIdStr}: ${e}`));
+            }
+        };
     }
     /**
      * Builds the attribute-change dispatcher closure for `nodeIdStr`.

@@ -247,6 +247,16 @@ export declare class ControllerManager {
      */
     private activateFullSubscription;
     /**
+     * Returns a callback for matter.js `updateTimeoutHandler`. This fires when
+     * the device stops sending reports within `maxIntervalCeiling` seconds —
+     * a silent subscription death that does NOT trigger `stateChanged`. Without
+     * this handler, events simply stop arriving with no error logged anywhere.
+     *
+     * On timeout we drop the cached node entry and reconnect, mirroring the
+     * logic already used for an explicit Disconnected → Connected cycle.
+     */
+    private makeUpdateTimeoutHandler;
+    /**
      * Builds the attribute-change dispatcher closure for `nodeIdStr`.
      * Extracted so both selective and full subscription paths share identical logic.
      * The returned function is stored by the matter.js subscription and lives for
