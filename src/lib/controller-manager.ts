@@ -274,6 +274,20 @@ export class ControllerManager {
    */
   private readonly stateHandlers = new Map<string, (state: NodeStates) => void>();
 
+  /**
+   * Tracks the last time we received a subscription report (attribute or event)
+   * for each node. Used by the health check to detect stale subscriptions on
+   * devices with poor/intermittent connectivity (e.g. Thread sensors with RSSI < -90 dBm).
+   */
+  private readonly lastReportTime = new Map<string, number>();
+
+  /**
+   * Periodic health check timer that detects stale subscriptions and triggers
+   * reconnection. Runs every 60 seconds to catch devices that silently stop
+   * sending reports without triggering Matter.js state changes.
+   */
+  private healthCheckInterval?: ReturnType<typeof setInterval>;
+
   /** Persisted registry of commissioned devices with their discovery data */
   private registry: DeviceRegistry = {};
   private registryPath = "";
@@ -334,6 +348,39 @@ export class ControllerManager {
       this.connectedNodes.delete(nodeIdStr);
       await node.disconnect().catch(() => {/* ignore disconnect errors */});
     }
+  }
+
+  /**
+   * Called after handler removal to disconnect nodes that no longer have any
+   * active handlers. Asynchronously cleans up the connection in the background
+   * without blocking the removal operation.
+   */
+  private releaseIfNoHandlers(nodeIdStr: string): void {
+    if (this.hasActiveHandlers(nodeIdStr)) return;
+    
+    const entry = this.connectedNodes.get(nodeIdStr);
+    if (!entry) return;
+    
+    // Clean up in background - don't await to avoid blocking handler removal
+    (async () => {
+      // Detach state handler
+      const stateHandler = this.stateHandlers.get(nodeIdStr);
+      if (stateHandler) {
+        entry.node.events.stateChanged.off(stateHandler);
+        this.stateHandlers.delete(nodeIdStr);
+      }
+      
+      // Remove from maps
+      this.connectedNodes.delete(nodeIdStr);
+      this.lastReportTime.delete(nodeIdStr);
+      
+      // Disconnect the node
+      await entry.node.disconnect().catch((e) => {
+        logger.debug(`Disconnect after handler removal failed for ${nodeIdStr}: ${e}`);
+      });
+      
+      logger.debug(`Released connection for ${nodeIdStr} after last handler removed`);
+    })();
   }
 
   // ----------- Lifecycle -------------------------------------------------
@@ -460,11 +507,17 @@ export class ControllerManager {
     await writeFile(this.registryPath, JSON.stringify(this.registry), "utf8")
       .catch(e => logger.warn(`Failed to persist registry on startup: ${e}`));
 
+    this.startHealthCheck();
     logger.info(`Matter controller started — storage: ${this.storagePath}`);
   }
 
   async close(): Promise<void> {
     if (!this.started) return;
+    // Stop health check monitoring
+    if (this.healthCheckInterval) {
+      clearInterval(this.healthCheckInterval);
+      this.healthCheckInterval = undefined;
+    }
     // Detach stateChanged listeners before clearing the node map so we still
     // have access to entry.node for the .off() call.
     for (const [nodeIdStr, entry] of this.connectedNodes) {
@@ -473,6 +526,7 @@ export class ControllerManager {
     }
     this.stateHandlers.clear();
     this.connectedNodes.clear();
+    this.lastReportTime.clear();
     this.attrHandlers.clear();
     this.eventHandlers.clear();
     this.attrHandlerFilters.clear();
@@ -611,7 +665,11 @@ export class ControllerManager {
       // await above. Using ! would crash with TypeError in that race; a guarded
       // get() makes the close-during-subscribe path a clean no-op instead.
       const sub = this.connectedNodes.get(nodeIdStr);
-      if (sub) sub.subscribed = true;
+      if (sub) {
+        sub.subscribed = true;
+        // Initialize health check timestamp — will be updated by updateReceived()
+        this.lastReportTime.set(nodeIdStr, Date.now());
+      }
     }
 
     return node;
@@ -860,6 +918,9 @@ export class ControllerManager {
     const filters = this.attrHandlerFilters.get(nodeIdStr);
     filters?.delete(handler);
     if (filters?.size === 0) this.attrHandlerFilters.delete(nodeIdStr);
+    
+    // Clean up connection if no handlers remain
+    this.releaseIfNoHandlers(nodeIdStr);
   }
 
   /**
@@ -891,6 +952,9 @@ export class ControllerManager {
     const filters = this.eventHandlerFilters.get(nodeIdStr);
     filters?.delete(handler);
     if (filters?.size === 0) this.eventHandlerFilters.delete(nodeIdStr);
+    
+    // Clean up connection if no handlers remain
+    this.releaseIfNoHandlers(nodeIdStr);
   }
 
   // ----------- Private helpers -------------------------------------------
@@ -903,6 +967,7 @@ export class ControllerManager {
   }
 
   private async ensureSubscribed(nodeIdStr: string): Promise<void> {
+    if (!this.started) return;
     const existing = this.connectedNodes.get(nodeIdStr);
     if (existing?.subscribed) return;
 
@@ -936,6 +1001,7 @@ export class ControllerManager {
   }
 
   private async activateSubscriptions(nodeIdStr: string, node: PairedNode): Promise<void> {
+    if (!this.started) return;
     if (this.canUseSelectiveSubscription(nodeIdStr)) {
       await this.activateSelectiveSubscription(nodeIdStr, node);
     } else {
@@ -1017,16 +1083,25 @@ export class ControllerManager {
         attributes: attributePaths,
         events:     eventPaths,
         minIntervalFloorSeconds:   30,
-        maxIntervalCeilingSeconds: 300,
+        maxIntervalCeilingSeconds: 180,  // Reduced from 300s for faster recovery
         attributeListener: this.makeAttrListener(nodeIdStr),
         eventListener:     this.makeEvtListener(nodeIdStr),
         updateTimeoutHandler: this.makeUpdateTimeoutHandler(nodeIdStr),
+        updateReceived: () => { this.lastReportTime.set(nodeIdStr, Date.now()); },
       });
-      this.setupStateHandler(nodeIdStr, node);
-      logger.info(`Selectively subscribed to clusters [${[...attrClusterIds].map(c => '0x' + c.toString(16)).join(', ')}] for node ${nodeIdStr}`);
     } catch (e) {
       logger.warn(`Selective subscription failed for node ${nodeIdStr}, falling back to full: ${e}`);
       await this.activateFullSubscription(nodeIdStr, node);
+      return;
+    }
+
+    // Setup state handler after successful subscription. If this fails, the
+    // subscription is still active and the health check will monitor the node.
+    try {
+      this.setupStateHandler(nodeIdStr, node);
+      logger.info(`Selectively subscribed to clusters [${[...attrClusterIds].map(c => '0x' + c.toString(16)).join(', ')}] for node ${nodeIdStr}`);
+    } catch (e) {
+      logger.warn(`setupStateHandler failed for node ${nodeIdStr}: ${e}`);
     }
   }
 
@@ -1050,13 +1125,21 @@ export class ControllerManager {
       attributes: [{}],   // wildcard — all attributes on all endpoints/clusters
       events:     [{}],   // wildcard — all events
       minIntervalFloorSeconds:   30,
-      maxIntervalCeilingSeconds: 300,
+      maxIntervalCeilingSeconds: 180,  // Reduced from 300s for faster recovery
       attributeListener: this.makeAttrListener(nodeIdStr),
       eventListener:     this.makeEvtListener(nodeIdStr),
       updateTimeoutHandler: this.makeUpdateTimeoutHandler(nodeIdStr),
+      updateReceived: () => { this.lastReportTime.set(nodeIdStr, Date.now()); },
     });
-    this.setupStateHandler(nodeIdStr, node);
-    logger.info(`Subscribed to all attributes and events for node ${nodeIdStr}`);
+
+    // Setup state handler after successful subscription. If this fails, the
+    // subscription is still active and the health check will monitor the node.
+    try {
+      this.setupStateHandler(nodeIdStr, node);
+      logger.info(`Subscribed to all attributes and events for node ${nodeIdStr}`);
+    } catch (e) {
+      logger.warn(`setupStateHandler failed for node ${nodeIdStr}: ${e}`);
+    }
   }
 
   /**
@@ -1082,6 +1165,7 @@ export class ControllerManager {
       }
       // Drop the stale entry so getOrConnectNode() opens a fresh CASE session.
       this.connectedNodes.delete(nodeIdStr);
+      this.lastReportTime.delete(nodeIdStr);
       if (this.hasActiveHandlers(nodeIdStr)) {
         this.getOrConnectNode(nodeIdStr, true).catch(e =>
           logger.warn(`Re-subscribe after timeout failed for ${nodeIdStr}: ${e}`),
@@ -1091,6 +1175,104 @@ export class ControllerManager {
   }
 
   /**
+   * Starts the periodic health check that detects stale subscriptions.
+   * Runs every 60 seconds to catch devices with poor connectivity (Thread sensors
+   * with RSSI < -90 dBm) that silently stop sending reports without triggering
+   * Matter.js state changes. More aggressive than updateTimeoutHandler for faster
+   * recovery on intermittent connections.
+   */
+  private startHealthCheck(): void {
+    // Clear any existing interval first (e.g. after hot-redeploy)
+    if (this.healthCheckInterval) {
+      clearInterval(this.healthCheckInterval);
+    }
+    this.healthCheckInterval = setInterval(() => {
+      this.performHealthCheck();
+    }, 60_000); // Check every 60 seconds
+  }
+
+  /**
+   * Health check logic: for each subscribed node, verify we've received a report
+   * within the expected maxInterval window + grace period. If not, proactively
+   * reconnect even if Matter.js still thinks the node is "Connected".
+   * 
+   * Iterates over all nodes with active handlers (not just connectedNodes) to
+   * ensure nodes that failed reconnection are retried on every health check cycle.
+   */
+  private performHealthCheck(): void {
+    // Guard against health check running during/after shutdown
+    if (!this.started) return;
+
+    const now = Date.now();
+    const maxSilence = 180_000 + 60_000; // maxIntervalCeiling (180s) + 60s grace = 240s
+
+    // Build set of all nodeIds with active handlers (these need event delivery)
+    const nodesWithHandlers = new Set<string>();
+    for (const nodeId of this.attrHandlers.keys()) nodesWithHandlers.add(nodeId);
+    for (const nodeId of this.eventHandlers.keys()) nodesWithHandlers.add(nodeId);
+
+    for (const nodeIdStr of nodesWithHandlers) {
+      const entry = this.connectedNodes.get(nodeIdStr);
+      
+      // If not connected or not subscribed, try to establish subscription
+      if (!entry || !entry.subscribed) {
+        // Skip if connection or subscription already in progress
+        if (this.connectingPromises.has(nodeIdStr) || this.subscribingPromises.has(nodeIdStr)) {
+          continue;
+        }
+        
+        // No connection or lost subscription - attempt to reconnect
+        logger.info(`Health check: node ${nodeIdStr} not subscribed, attempting connection`);
+        this.getOrConnectNode(nodeIdStr, true).catch(e =>
+          logger.debug(`Health check connection attempt failed for ${nodeIdStr}: ${e}`)
+        );
+        continue;
+      }
+
+      // Node is subscribed - check if reports are arriving
+      const lastReport = this.lastReportTime.get(nodeIdStr);
+      if (!lastReport) {
+        // Subscription just started, no reports yet — record now as baseline
+        this.lastReportTime.set(nodeIdStr, now);
+        continue;
+      }
+
+      const silenceDuration = now - lastReport;
+      if (silenceDuration > maxSilence) {
+        // Skip if connection or subscription already in progress
+        if (this.connectingPromises.has(nodeIdStr) || this.subscribingPromises.has(nodeIdStr)) {
+          logger.debug(`Health check: skipping ${nodeIdStr}, reconnection already in progress`);
+          continue;
+        }
+
+        logger.warn(
+          `Health check: node ${nodeIdStr} silent for ${Math.round(silenceDuration / 1000)}s ` +
+          `(threshold ${maxSilence / 1000}s) — triggering reconnect`
+        );
+
+      // Detach the stateChanged listener before deleting entry
+      const prevStateHandler = this.stateHandlers.get(nodeIdStr);
+      if (prevStateHandler) {
+        entry.node.events.stateChanged.off(prevStateHandler);
+        this.stateHandlers.delete(nodeIdStr);
+      }
+
+      // Drop the stale PairedNode entry so getOrConnectNode() opens a fresh
+      // CASE session with updated mDNS discovery (critical for Thread devices
+      // that may have changed IPv6 addresses).
+      this.connectedNodes.delete(nodeIdStr);
+      this.lastReportTime.delete(nodeIdStr);
+      
+      // Attempt reconnection - if this fails, next health check will retry
+      // because we iterate over nodesWithHandlers, not connectedNodes
+      this.getOrConnectNode(nodeIdStr, true).catch(e =>
+        logger.debug(`Health check reconnect failed for ${nodeIdStr}: ${e}`)
+      );
+    }
+  }
+}
+
+  /**
    * Builds the attribute-change dispatcher closure for `nodeIdStr`.
    * Extracted so both selective and full subscription paths share identical logic.
    * The returned function is stored by the matter.js subscription and lives for
@@ -1098,6 +1280,10 @@ export class ControllerManager {
    */
   private makeAttrListener(nodeIdStr: string) {
     return (data: { path: { endpointId: number; clusterId: number; attributeName: string }; value: unknown }) => {
+      // Update health check timestamp - defensive update even though updateReceived
+      // callback should also fire. This ensures we track activity even if callback fails.
+      this.lastReportTime.set(nodeIdStr, Date.now());
+      
       const handlers = this.attrHandlers.get(nodeIdStr);
       if (!handlers?.size) return;
       const filters = this.attrHandlerFilters.get(nodeIdStr);
@@ -1132,6 +1318,10 @@ export class ControllerManager {
    */
   private makeEvtListener(nodeIdStr: string) {
     return (data: { path: { endpointId: number; clusterId: number; eventName: string }; events: unknown[] }) => {
+      // Update health check timestamp - defensive update even though updateReceived
+      // callback should also fire. This ensures we track activity even if callback fails.
+      this.lastReportTime.set(nodeIdStr, Date.now());
+      
       const handlers = this.eventHandlers.get(nodeIdStr);
       if (!handlers?.size) return;
       const filters = this.eventHandlerFilters.get(nodeIdStr);
@@ -1181,7 +1371,7 @@ export class ControllerManager {
       if (state === NodeStates.Disconnected || state === NodeStates.Reconnecting) {
         wasDisconnected = true;
         entry.subscribed = false;
-        logger.info(`Node ${nodeIdStr} disconnected — subscription lost, will re-subscribe on reconnect`);
+        logger.info(`Node ${nodeIdStr} ${NodeStates[state]} — subscription lost, will re-subscribe on reconnect`);
       } else if (state === NodeStates.Connected && wasDisconnected) {
         wasDisconnected = false;
         if (this.hasActiveHandlers(nodeIdStr)) {
@@ -1200,6 +1390,7 @@ export class ControllerManager {
           // ctrl.connectNode() performs fresh mDNS operational discovery and
           // establishes a new CASE session before the Subscribe Request is sent.
           this.connectedNodes.delete(nodeIdStr);
+          this.lastReportTime.delete(nodeIdStr);
           this.getOrConnectNode(nodeIdStr, true).catch(e =>
             logger.warn(`Re-subscribe after reconnect failed for ${nodeIdStr}: ${e}`),
           );
@@ -1277,6 +1468,18 @@ export class ControllerManager {
     const ctrl = this.requireController();
     const nodeId = NodeId(BigInt(nodeIdStr));
 
+    // Wait for any in-flight connections to complete before removing.
+    // If we just delete the promise without awaiting, the async work continues
+    // and could add the node back to connectedNodes after we've cleaned it up.
+    const connectingPromise = this.connectingPromises.get(nodeIdStr);
+    if (connectingPromise) {
+      await connectingPromise.catch(() => {/* ignore connection errors during removal */});
+    }
+    const subscribingPromise = this.subscribingPromises.get(nodeIdStr);
+    if (subscribingPromise) {
+      await subscribingPromise.catch(() => {/* ignore subscription errors during removal */});
+    }
+
     // Clean up any active subscriptions / handlers before removing
     const existingEntry = this.connectedNodes.get(nodeIdStr);
     const existingStateHandler = this.stateHandlers.get(nodeIdStr);
@@ -1285,12 +1488,11 @@ export class ControllerManager {
     }
     this.stateHandlers.delete(nodeIdStr);
     this.connectedNodes.delete(nodeIdStr);
+    this.lastReportTime.delete(nodeIdStr);
     this.attrHandlers.delete(nodeIdStr);
     this.eventHandlers.delete(nodeIdStr);
     this.attrHandlerFilters.delete(nodeIdStr);
     this.eventHandlerFilters.delete(nodeIdStr);
-    // Cancel any in-flight connection or subscription so it doesn't establish a
-    // live Matter session to a device that has just been decommissioned.
     this.connectingPromises.delete(nodeIdStr);
     this.subscribingPromises.delete(nodeIdStr);
 
@@ -1338,6 +1540,7 @@ export class ControllerManager {
       }
       this.stateHandlers.delete(nodeIdStr);
       this.connectedNodes.delete(nodeIdStr);
+      this.lastReportTime.delete(nodeIdStr);
       this.connectingPromises.delete(nodeIdStr);
       this.subscribingPromises.delete(nodeIdStr);
 

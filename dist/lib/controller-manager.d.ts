@@ -126,6 +126,18 @@ export declare class ControllerManager {
      * detached in close() and removeDevice().
      */
     private readonly stateHandlers;
+    /**
+     * Tracks the last time we received a subscription report (attribute or event)
+     * for each node. Used by the health check to detect stale subscriptions on
+     * devices with poor/intermittent connectivity (e.g. Thread sensors with RSSI < -90 dBm).
+     */
+    private readonly lastReportTime;
+    /**
+     * Periodic health check timer that detects stale subscriptions and triggers
+     * reconnection. Runs every 60 seconds to catch devices that silently stop
+     * sending reports without triggering Matter.js state changes.
+     */
+    private healthCheckInterval?;
     /** Persisted registry of commissioned devices with their discovery data */
     private registry;
     private registryPath;
@@ -145,6 +157,12 @@ export declare class ControllerManager {
      * client objects (~15 MB per device).
      */
     private releaseIfTransient;
+    /**
+     * Called after handler removal to disconnect nodes that no longer have any
+     * active handlers. Asynchronously cleans up the connection in the background
+     * without blocking the removal operation.
+     */
+    private releaseIfNoHandlers;
     start(): Promise<void>;
     private _doStart;
     close(): Promise<void>;
@@ -256,6 +274,23 @@ export declare class ControllerManager {
      * logic already used for an explicit Disconnected → Connected cycle.
      */
     private makeUpdateTimeoutHandler;
+    /**
+     * Starts the periodic health check that detects stale subscriptions.
+     * Runs every 60 seconds to catch devices with poor connectivity (Thread sensors
+     * with RSSI < -90 dBm) that silently stop sending reports without triggering
+     * Matter.js state changes. More aggressive than updateTimeoutHandler for faster
+     * recovery on intermittent connections.
+     */
+    private startHealthCheck;
+    /**
+     * Health check logic: for each subscribed node, verify we've received a report
+     * within the expected maxInterval window + grace period. If not, proactively
+     * reconnect even if Matter.js still thinks the node is "Connected".
+     *
+     * Iterates over all nodes with active handlers (not just connectedNodes) to
+     * ensure nodes that failed reconnection are retried on every health check cycle.
+     */
+    private performHealthCheck;
     /**
      * Builds the attribute-change dispatcher closure for `nodeIdStr`.
      * Extracted so both selective and full subscription paths share identical logic.
