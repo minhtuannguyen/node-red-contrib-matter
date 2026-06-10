@@ -116,15 +116,28 @@
   </p>
 
   <h3>How it works</h3>
-  <p>
-    On each incoming message the node reads the host clock (<code>Date.now()</code>),
-    converts it to Matter epoch-microseconds (microseconds since 2000-01-01 UTC),
-    and calls <code>setUtcTime</code> with
-    <code>granularity = MillisecondsGranularity</code> and
-    <code>timeSource = Admin</code>.
-    No timers are created — use an <em>Inject</em> node set to repeat for periodic
-    synchronization.
-  </p>
+  <p>On each incoming message the node executes three commands in sequence:</p>
+  <ol>
+    <li>
+      <code>SetTimeZone</code> — sends the host UTC offset (DST included) with
+      <code>validAt = 0</code> (valid from Matter epoch start).
+      This resets the device's internal time-source state so it is required to
+      accept the subsequent <code>SetUTCTime</code>.
+      Silently skipped if the device does not support the TimeZone feature.
+    </li>
+    <li>
+      <code>SetDSTOffset []</code> — clears the DST table (DST is already folded
+      into the UTC offset above).
+      Silently skipped if not supported.
+    </li>
+    <li>
+      <code>SetUTCTime</code> — sends the current Unix epoch in microseconds with
+      <code>granularity = MicrosecondsGranularity</code> and
+      <code>timeSource = Admin</code>.
+      matter.js converts to Matter epoch (2000-01-01) internally.
+    </li>
+  </ol>
+  <p>No timers are created — use an <em>Inject</em> node set to repeat for periodic synchronization.</p>
 
   <h3>Input</h3>
   <dl class="message-properties">
