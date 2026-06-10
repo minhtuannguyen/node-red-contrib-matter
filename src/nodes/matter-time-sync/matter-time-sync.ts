@@ -28,28 +28,23 @@ const GRANULARITY_MILLISECONDS = 3;
  */
 const TIME_SOURCE_ADMIN = 2;
 
-/**
- * Microseconds between Unix epoch (1970-01-01 UTC) and Matter epoch (2000-01-01 UTC).
- * 30 years with 7 leap years (1972, 1976, 1980, 1984, 1988, 1992, 1996):
- *   (30 × 365 + 7) × 86400 × 1_000_000 = 946_684_800_000_000 µs
- * Cross-checked: new Date('2000-01-01T00:00:00Z').getTime() × 1000 === this value.
- * Stored as a BigInt literal — zero runtime cost, no allocation on each call.
- */
-const MATTER_EPOCH_OFFSET_US = 946_684_800_000_000n;
-
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
 /**
- * Returns current wall-clock time expressed as Matter epoch-us
- * (microseconds since 2000-01-01 00:00:00 UTC).
+ * Returns current wall-clock time as Unix epoch-microseconds
+ * (microseconds since 1970-01-01 00:00:00 UTC).
+ *
+ * matter.js TlvEpochUs expects Unix epoch µs and converts to the Matter epoch
+ * (2000-01-01) internally — do NOT pre-subtract the offset here.
+ * See: @matter/types/src/tlv/TlvNumber.ts — TlvEpochUs.wrap().
  *
  * Uses a single Date.now() call — no Date object heap-allocated.
- * BigInt arithmetic is used for the 64-bit range required by the spec.
+ * BigInt is required to preserve full µs precision for the 64-bit TLV field.
  */
-function nowMatterEpochUs(): bigint {
-  return BigInt(Date.now()) * 1_000n - MATTER_EPOCH_OFFSET_US;
+function nowUnixEpochUs(): bigint {
+  return BigInt(Date.now()) * 1_000n;
 }
 
 // ---------------------------------------------------------------------------
@@ -94,15 +89,15 @@ module.exports = function (RED: NodeRedAPI) {
       try {
         // Capture time as close to the network call as possible to minimise
         // the offset introduced by Node-RED event-loop scheduling.
-        const utcTime = nowMatterEpochUs();
+        const utcTime = nowUnixEpochUs();
 
         await controllerNode.manager.invokeCommand(
           nodeId,
           ROOT_ENDPOINT,
           TIME_SYNC_CLUSTER_ID,
           "setUtcTime",
-          // utcTime is a BigInt — valid as Record<string,unknown> value;
-          // matter.js TLV encoder reads the runtime type and encodes correctly.
+          // utcTime is Unix epoch µs (since 1970-01-01) as BigInt.
+          // TlvEpochUs converts to Matter epoch internally — do NOT pre-subtract the offset.
           { utcTime, granularity: GRANULARITY_MILLISECONDS, timeSource: TIME_SOURCE_ADMIN },
         );
 
