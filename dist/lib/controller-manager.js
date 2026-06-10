@@ -1015,29 +1015,30 @@ class ControllerManager {
         ]);
         for (const nodeIdStr of nodesWithHandlers) {
             const entry = this.connectedNodes.get(nodeIdStr);
-            // If not connected, try to establish a fresh subscription.
-            // Note: since stateChanged(Disconnected) now immediately evicts the
-            // connectedNodes entry, a truly-disconnected node will have !entry.
-            // The only case where entry exists with subscribed=false is the narrow
-            // window between ctrl.connectNode() completing and activateSubscriptions()
-            // finishing — in that case we must NOT disrupt the in-progress setup.
             if (!entry || !entry.subscribed) {
-                // Skip if connection or subscription already in progress
+                // Skip if a connection or subscription attempt is already in progress.
                 if (this.connectingPromises.has(nodeIdStr) || this.subscribingPromises.has(nodeIdStr)) {
                     continue;
                 }
-                // Skip the in-progress window: entry present but subscribed=false means
-                // connectWork completed but activateSubscriptions hasn't finished yet.
-                // Evicting here would cause a double-subscription; let it complete.
                 if (entry && !entry.subscribed) {
+                    // Node is connected but subscription was lost or never established.
+                    // This happens when:
+                    //   (a) stateChanged(Reconnecting) evicted connectedNodes, a transient
+                    //       getOrConnectNode(false) (e.g. readCachedAttribute / time-sync)
+                    //       re-created the entry with subscribed=false, and stateChanged(Connected)
+                    //       hasn't fired yet to re-subscribe — can persist indefinitely.
+                    //   (b) narrow window between connectWork completing and activateSubscriptions
+                    //       finishing (seconds only — protected by connectingPromises above).
+                    // Re-subscribe using the existing connected PairedNode so we don't
+                    // need another ctrl.connectNode() round-trip.
+                    logger.info(`Health check: node ${nodeIdStr} connected but not subscribed — re-subscribing`);
+                    this.getOrConnectNode(nodeIdStr, true).catch(e => logger.debug(`Health check re-subscribe failed for ${nodeIdStr}: ${e}`));
                     continue;
                 }
-                // Evict the stateHandler before starting the reconnect so that if
-                // matter.js fires stateChanged(Connected) on the old node while our
-                // getOrConnectNode() is already in-flight, the old handler's Connected
-                // branch does not race us and send a second Subscribe Request.
-                // setupStateHandler() called inside activateSubscriptions() will install
-                // a fresh handler once the new subscription is established.
+                // entry is null — node was evicted on Disconnect/Reconnecting and
+                // stateChanged(Connected) has not yet fired (or matter.js gave up).
+                // Evict the stateHandler so it doesn't race our getOrConnectNode call
+                // if Connected arrives while we are already reconnecting.
                 const sh = this.stateHandlers.get(nodeIdStr);
                 if (sh) {
                     const nodeRef = this.stateHandlerNodes.get(nodeIdStr);
