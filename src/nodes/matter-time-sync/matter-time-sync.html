@@ -1,0 +1,160 @@
+<script type="text/javascript">
+(function () {
+  // Hex cluster ID for TimeSynchronization (0x0038) — used to filter devices
+  // in the registry dropdown to only show capable devices.
+  var TIME_SYNC_CLUSTER_HEX = '0038';
+
+  /**
+   * Returns true when the registry entry's discovery data contains the
+   * TimeSynchronization cluster (0x0038) on any endpoint.
+   * Falls back to true if discovery data is absent (undiscovered device).
+   */
+  function supportsTimeSync(entry) {
+    if (!entry.discovery || !entry.discovery.endpoints) return true;
+    return entry.discovery.endpoints.some(function (ep) {
+      return ep.clusters && ep.clusters.some(function (cl) {
+        return cl.clusterIdHex === TIME_SYNC_CLUSTER_HEX;
+      });
+    });
+  }
+
+  RED.nodes.registerType('matter-time-sync', {
+    category:    'matter',
+    color:       '#7CBBDE',
+    defaults: {
+      name:       { value: '' },
+      controller: { value: '', type: 'matter-controller', required: true },
+      nodeId:     { value: '' }
+    },
+    inputs:  1,
+    outputs: 1,
+    icon:    'font-awesome/fa-clock-o',
+    label: function () {
+      return this.name || 'Matter Time Sync';
+    },
+    paletteLabel: 'time sync',
+    oneditprepare: function () {
+      var self = this;
+
+      function loadRegistry(ctrlId) {
+        var $device = $('#nr-mts-device');
+
+        if (!ctrlId) {
+          $device.empty().append($('<option>').val('').text('— select a controller first —'));
+          $('#node-input-nodeId').val('');
+          return;
+        }
+
+        $device.empty().append($('<option>').val('').text('— loading… —'));
+
+        $.getJSON('/matter-nodes/' + ctrlId + '/registry')
+          .done(function (reg) {
+            $device.empty().append($('<option>').val('').text('— select device —'));
+            Object.values(reg || {}).forEach(function (e) {
+              if (supportsTimeSync(e)) {
+                $device.append($('<option>').val(e.nodeId).text(e.label + ' (' + e.nodeId + ')'));
+              }
+            });
+            // Restore previously saved nodeId selection
+            var saved = $('#node-input-nodeId').val();
+            if (saved) $device.val(saved);
+          })
+          .fail(function (jqXHR) {
+            var hint = jqXHR.status === 0
+              ? 'cannot reach Node-RED'
+              : 'deploy the flow first, then re-open this dialog';
+            $device.empty().append($('<option>').val('').text('— could not load registry (' + hint + ') —'));
+          });
+      }
+
+      $('#nr-mts-device').on('change', function () {
+        $('#node-input-nodeId').val($(this).val());
+      });
+
+      $('#node-input-controller').on('change', function () {
+        loadRegistry($(this).val());
+      });
+
+      loadRegistry(self.controller);
+    }
+  });
+}());
+</script>
+
+<script type="text/html" data-template-name="matter-time-sync">
+  <div class="form-row">
+    <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+    <input type="text" id="node-input-name" placeholder="Matter Time Sync">
+  </div>
+  <div class="form-row">
+    <label for="node-input-controller"><i class="fa fa-cog"></i> Controller</label>
+    <input type="text" id="node-input-controller">
+  </div>
+
+  <div class="form-tips" style="margin: 8px 0 4px 0">
+    Only devices with the TimeSynchronization cluster (0x0038) are listed.
+  </div>
+  <div class="form-row">
+    <label><i class="fa fa-microchip"></i> Device</label>
+    <select id="nr-mts-device" style="width:70%"><option value="">— select a controller first —</option></select>
+  </div>
+
+  <!-- Hidden input keeps the nodeId in the node's saved config -->
+  <input type="hidden" id="node-input-nodeId">
+
+  <div class="form-tips" style="margin: 8px 0 4px 0">
+    Override the device at runtime by setting <code>msg.nodeId</code> to the
+    decimal node ID before this node.
+  </div>
+</script>
+
+<script type="text/html" data-help-name="matter-time-sync">
+  <p>
+    Synchronizes the UTC time on a commissioned Matter device that supports the
+    <strong>TimeSynchronization</strong> cluster (0x0038).
+    The command is sent to endpoint 0 (the only valid endpoint per the Matter spec).
+  </p>
+
+  <h3>How it works</h3>
+  <p>
+    On each incoming message the node reads the host clock (<code>Date.now()</code>),
+    converts it to Matter epoch-microseconds (microseconds since 2000-01-01 UTC),
+    and calls <code>setUtcTime</code> with
+    <code>granularity = MillisecondsGranularity</code> and
+    <code>timeSource = Admin</code>.
+    No timers are created — use an <em>Inject</em> node set to repeat for periodic
+    synchronization.
+  </p>
+
+  <h3>Input</h3>
+  <dl class="message-properties">
+    <dt class="optional">nodeId <span class="property-type">string</span></dt>
+    <dd>
+      Decimal Matter node ID — overrides the device configured in the node's
+      properties panel.
+    </dd>
+  </dl>
+
+  <h3>Output</h3>
+  <dl class="message-properties">
+    <dt>payload <span class="property-type">object</span></dt>
+    <dd>
+      <code>{ synced: true, syncedAt: "&lt;ISO-8601&gt;" }</code> on success.
+    </dd>
+    <dt>topic <span class="property-type">string</span></dt>
+    <dd><code>"time-sync"</code></dd>
+  </dl>
+
+  <h3>Device compatibility</h3>
+  <p>
+    The device must support the TimeSynchronization cluster (0x0038).
+    Known compatible devices include the IKEA ALPSTUGA and IKEA VINDSTYRKA air
+    quality sensors.  If the cluster is absent the node will output an error.
+  </p>
+
+  <h3>Scheduling example</h3>
+  <p>
+    Connect an <em>Inject</em> node (repeat every 1 hour) → <em>Matter Time Sync</em>.
+    After a device comes back online, trigger it once via an automation or manually.
+  </p>
+</script>

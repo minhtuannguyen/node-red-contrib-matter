@@ -35,7 +35,8 @@
       "matter-discover": "dist/nodes/matter-discover/matter-discover.js",
       "matter-command": "dist/nodes/matter-command/matter-command.js",
       "matter-read": "dist/nodes/matter-read/matter-read.js",
-      "matter-subscribe": "dist/nodes/matter-subscribe/matter-subscribe.js"
+      "matter-subscribe": "dist/nodes/matter-subscribe/matter-subscribe.js",
+      "matter-time-sync": "dist/nodes/matter-time-sync/matter-time-sync.js"
     }
   },
   "dependencies": {
