@@ -163,6 +163,13 @@ class ControllerManager {
      */
     stateHandlers = new Map();
     /**
+     * Maps nodeId → PairedNode for nodes whose stateHandler is active but whose
+     * connectedNodes entry has been evicted (i.e. the node is in Disconnected or
+     * Reconnecting state).  Required so close() can call .off(handler) on the
+     * correct node even when the node is absent from connectedNodes.
+     */
+    stateHandlerNodes = new Map();
+    /**
      * Tracks the last time we received a subscription report (attribute or event)
      * for each node. Used by the health check to detect stale subscriptions on
      * devices with poor/intermittent connectivity (e.g. Thread sensors with RSSI < -90 dBm).
@@ -245,6 +252,7 @@ class ControllerManager {
             if (stateHandler) {
                 entry.node.events.stateChanged.off(stateHandler);
                 this.stateHandlers.delete(nodeIdStr);
+                this.stateHandlerNodes.delete(nodeIdStr);
             }
             // Remove from maps
             this.connectedNodes.delete(nodeIdStr);
@@ -378,14 +386,17 @@ class ControllerManager {
             clearInterval(this.healthCheckInterval);
             this.healthCheckInterval = undefined;
         }
-        // Detach stateChanged listeners before clearing the node map so we still
-        // have access to entry.node for the .off() call.
-        for (const [nodeIdStr, entry] of this.connectedNodes) {
-            const h = this.stateHandlers.get(nodeIdStr);
-            if (h)
-                entry.node.events.stateChanged.off(h);
+        // Detach all stateChanged listeners. Since we evict connectedNodes entries on
+        // Disconnect, some nodes may have an active stateHandler but no connectedNodes
+        // entry; stateHandlerNodes holds their PairedNode reference for exactly this case.
+        for (const [nodeIdStr, handler] of this.stateHandlers) {
+            const node = this.connectedNodes.get(nodeIdStr)?.node ??
+                this.stateHandlerNodes.get(nodeIdStr);
+            if (node)
+                node.events.stateChanged.off(handler);
         }
         this.stateHandlers.clear();
+        this.stateHandlerNodes.clear();
         this.connectedNodes.clear();
         this.lastReportTime.clear();
         this.attrHandlers.clear();
@@ -956,6 +967,7 @@ class ControllerManager {
             if (prevStateHandler) {
                 entry.node.events.stateChanged.off(prevStateHandler);
                 this.stateHandlers.delete(nodeIdStr);
+                this.stateHandlerNodes.delete(nodeIdStr);
             }
             // Drop the stale entry so getOrConnectNode() opens a fresh CASE session.
             this.connectedNodes.delete(nodeIdStr);
@@ -995,23 +1007,47 @@ class ControllerManager {
             return;
         const now = Date.now();
         const maxSilence = 180_000 + 60_000; // maxIntervalCeiling (180s) + 60s grace = 240s
-        // Build set of all nodeIds with active handlers (these need event delivery)
-        const nodesWithHandlers = new Set();
-        for (const nodeId of this.attrHandlers.keys())
-            nodesWithHandlers.add(nodeId);
-        for (const nodeId of this.eventHandlers.keys())
-            nodesWithHandlers.add(nodeId);
+        // Build set of all nodeIds with active handlers (these need event delivery).
+        // Use a Set to deduplicate nodes that appear in both attrHandlers and eventHandlers.
+        const nodesWithHandlers = new Set([
+            ...this.attrHandlers.keys(),
+            ...this.eventHandlers.keys(),
+        ]);
         for (const nodeIdStr of nodesWithHandlers) {
             const entry = this.connectedNodes.get(nodeIdStr);
-            // If not connected or not subscribed, try to establish subscription
+            // If not connected, try to establish a fresh subscription.
+            // Note: since stateChanged(Disconnected) now immediately evicts the
+            // connectedNodes entry, a truly-disconnected node will have !entry.
+            // The only case where entry exists with subscribed=false is the narrow
+            // window between ctrl.connectNode() completing and activateSubscriptions()
+            // finishing — in that case we must NOT disrupt the in-progress setup.
             if (!entry || !entry.subscribed) {
                 // Skip if connection or subscription already in progress
                 if (this.connectingPromises.has(nodeIdStr) || this.subscribingPromises.has(nodeIdStr)) {
                     continue;
                 }
-                // No connection or lost subscription - attempt to reconnect
-                logger.info(`Health check: node ${nodeIdStr} not subscribed, attempting connection`);
-                this.getOrConnectNode(nodeIdStr, true).catch(e => logger.debug(`Health check connection attempt failed for ${nodeIdStr}: ${e}`));
+                // Skip the in-progress window: entry present but subscribed=false means
+                // connectWork completed but activateSubscriptions hasn't finished yet.
+                // Evicting here would cause a double-subscription; let it complete.
+                if (entry && !entry.subscribed) {
+                    continue;
+                }
+                // Evict the stateHandler before starting the reconnect so that if
+                // matter.js fires stateChanged(Connected) on the old node while our
+                // getOrConnectNode() is already in-flight, the old handler's Connected
+                // branch does not race us and send a second Subscribe Request.
+                // setupStateHandler() called inside activateSubscriptions() will install
+                // a fresh handler once the new subscription is established.
+                const sh = this.stateHandlers.get(nodeIdStr);
+                if (sh) {
+                    const nodeRef = this.stateHandlerNodes.get(nodeIdStr);
+                    if (nodeRef)
+                        nodeRef.events.stateChanged.off(sh);
+                    this.stateHandlers.delete(nodeIdStr);
+                    this.stateHandlerNodes.delete(nodeIdStr);
+                }
+                logger.info(`Health check: node ${nodeIdStr} not connected, attempting reconnection`);
+                this.getOrConnectNode(nodeIdStr, true).catch(e => logger.debug(`Health check reconnect attempt failed for ${nodeIdStr}: ${e}`));
                 continue;
             }
             // Node is subscribed - check if reports are arriving
@@ -1030,19 +1066,21 @@ class ControllerManager {
                 }
                 logger.warn(`Health check: node ${nodeIdStr} silent for ${Math.round(silenceDuration / 1000)}s ` +
                     `(threshold ${maxSilence / 1000}s) — triggering reconnect`);
-                // Detach the stateChanged listener before deleting entry
+                // Detach the stateChanged listener before evicting the entry so the
+                // old handler does not fire on the evicted (now-stale) node reference.
                 const prevStateHandler = this.stateHandlers.get(nodeIdStr);
                 if (prevStateHandler) {
                     entry.node.events.stateChanged.off(prevStateHandler);
                     this.stateHandlers.delete(nodeIdStr);
+                    this.stateHandlerNodes.delete(nodeIdStr);
                 }
                 // Drop the stale PairedNode entry so getOrConnectNode() opens a fresh
                 // CASE session with updated mDNS discovery (critical for Thread devices
                 // that may have changed IPv6 addresses).
                 this.connectedNodes.delete(nodeIdStr);
                 this.lastReportTime.delete(nodeIdStr);
-                // Attempt reconnection - if this fails, next health check will retry
-                // because we iterate over nodesWithHandlers, not connectedNodes
+                // Attempt reconnection — if this fails, next health check will retry
+                // because we iterate over nodesWithHandlers, not connectedNodes.
                 this.getOrConnectNode(nodeIdStr, true).catch(e => logger.debug(`Health check reconnect failed for ${nodeIdStr}: ${e}`));
             }
         }
@@ -1137,6 +1175,27 @@ class ControllerManager {
     /**
      * Attach the stateChanged listener that re-subscribes on reconnect.
      * Extracted so both full and selective subscription paths share the same logic.
+     *
+     * Reconnection strategy
+     * ─────────────────────
+     * On Disconnected/Reconnecting we IMMEDIATELY evict the connectedNodes entry
+     * so that every subsequent reconnect path — whether it arrives via:
+     *   (a) stateChanged(Connected) fired by matter.js auto-reconnect, OR
+     *   (b) the periodic health check (when matter.js never fires Connected), OR
+     *   (c) updateTimeoutHandler (subscription heartbeat timeout)
+     * — is forced to call ctrl.connectNode() for a fresh CASE session.
+     *
+     * Without the eviction, getOrConnectNode() finds the stale entry and calls
+     * activateSubscriptions() on the disconnected PairedNode whose InteractionClient
+     * is bound to the dead session.  Matter.js does not throw — the subscribe call
+     * "succeeds" but no reports ever arrive, leaving the node silently dead.
+     *
+     * Self-detach guard
+     * ─────────────────
+     * The guard uses stateHandlers.get(nodeIdStr) !== stateHandler instead of
+     * !connectedNodes.get(nodeIdStr).  The old guard checked the connectedNodes map,
+     * but we now delete the entry on Disconnect, which would have caused the handler
+     * to self-detach before it could see the subsequent Connected event.
      */
     setupStateHandler(nodeIdStr, node) {
         // Remove any previous listener first — activateSubscriptions may be called
@@ -1146,17 +1205,28 @@ class ControllerManager {
             node.events.stateChanged.off(prevStateHandler);
         let wasDisconnected = false;
         const stateHandler = (state) => {
-            const entry = this.connectedNodes.get(nodeIdStr);
-            if (!entry) {
-                // Node was removed — detach this listener
+            // Self-detach if this handler has been superseded (replaced by a newer
+            // setupStateHandler call or explicitly removed by close()/removeDevice()).
+            // We intentionally do NOT check connectedNodes here — we delete that entry
+            // on Disconnect and need the handler to survive until Connected fires.
+            if (this.stateHandlers.get(nodeIdStr) !== stateHandler) {
                 node.events.stateChanged.off(stateHandler);
-                this.stateHandlers.delete(nodeIdStr);
                 return;
             }
             if (state === device_1.NodeStates.Disconnected || state === device_1.NodeStates.Reconnecting) {
                 wasDisconnected = true;
-                entry.subscribed = false;
-                logger.info(`Node ${nodeIdStr} ${device_1.NodeStates[state]} — subscription lost, will re-subscribe on reconnect`);
+                // Evict the stale PairedNode entry immediately so every downstream
+                // reconnect path (Connected branch below, health check, timeout handler)
+                // is forced through ctrl.connectNode() for a fresh CASE session.
+                // Keeping only subscribed=false here was the root cause of the bug:
+                // getOrConnectNode() would find the stale entry and call
+                // activateSubscriptions() on the dead node, silently failing forever.
+                this.connectedNodes.delete(nodeIdStr);
+                this.lastReportTime.delete(nodeIdStr);
+                // Keep node reference in stateHandlerNodes so close() can still call
+                // .off(handler) even though connectedNodes no longer holds the entry.
+                this.stateHandlerNodes.set(nodeIdStr, node);
+                logger.info(`Node ${nodeIdStr} ${device_1.NodeStates[state]} — evicted stale connection, will reconnect when available`);
             }
             else if (state === device_1.NodeStates.Connected && wasDisconnected) {
                 wasDisconnected = false;
@@ -1167,22 +1237,19 @@ class ControllerManager {
                     // entry (no stale prevStateHandler to .off() on the wrong PairedNode).
                     node.events.stateChanged.off(stateHandler);
                     this.stateHandlers.delete(nodeIdStr);
-                    // Drop the stale PairedNode entry so getOrConnectNode() calls
-                    // ctrl.connectNode() for a fresh CASE session. Thread devices often
-                    // change their operational IPv6 address on reboot; reusing the cached
-                    // PairedNode's InteractionClient (bound to the old session/address)
-                    // causes subscribeMultipleAttributesAndEvents to silently fail or
-                    // deliver no reports, leaving the node permanently unsubscribed.
-                    // ctrl.connectNode() performs fresh mDNS operational discovery and
-                    // establishes a new CASE session before the Subscribe Request is sent.
-                    this.connectedNodes.delete(nodeIdStr);
-                    this.lastReportTime.delete(nodeIdStr);
+                    this.stateHandlerNodes.delete(nodeIdStr);
+                    // connectedNodes was already evicted on Disconnect — no stale entry to
+                    // worry about.  getOrConnectNode() will call ctrl.connectNode() for a
+                    // fresh mDNS-discovered CASE session before sending the Subscribe Request.
                     this.getOrConnectNode(nodeIdStr, true).catch(e => logger.warn(`Re-subscribe after reconnect failed for ${nodeIdStr}: ${e}`));
                 }
             }
         };
         node.events.stateChanged.on(stateHandler);
         this.stateHandlers.set(nodeIdStr, stateHandler);
+        // Clear any stale evicted-node reference — the subscription is now active
+        // so connectedNodes holds the current entry.
+        this.stateHandlerNodes.delete(nodeIdStr);
     }
     // ----------- Private helpers (registry & storage) -----------------------
     /**
@@ -1254,10 +1321,15 @@ class ControllerManager {
         // Clean up any active subscriptions / handlers before removing
         const existingEntry = this.connectedNodes.get(nodeIdStr);
         const existingStateHandler = this.stateHandlers.get(nodeIdStr);
-        if (existingEntry && existingStateHandler) {
-            existingEntry.node.events.stateChanged.off(existingStateHandler);
+        if (existingStateHandler) {
+            // Detach from the connected node if present; otherwise fall back to the
+            // evicted-node reference kept in stateHandlerNodes (Disconnected state).
+            const nodeRef = existingEntry?.node ?? this.stateHandlerNodes.get(nodeIdStr);
+            if (nodeRef)
+                nodeRef.events.stateChanged.off(existingStateHandler);
         }
         this.stateHandlers.delete(nodeIdStr);
+        this.stateHandlerNodes.delete(nodeIdStr);
         this.connectedNodes.delete(nodeIdStr);
         this.lastReportTime.delete(nodeIdStr);
         this.attrHandlers.delete(nodeIdStr);
@@ -1302,10 +1374,13 @@ class ControllerManager {
             // address on the next connectNode() call.
             const entry = this.connectedNodes.get(nodeIdStr);
             const prevStateHandler = this.stateHandlers.get(nodeIdStr);
-            if (entry && prevStateHandler) {
-                entry.node.events.stateChanged.off(prevStateHandler);
+            if (prevStateHandler) {
+                const nodeRef = entry?.node ?? this.stateHandlerNodes.get(nodeIdStr);
+                if (nodeRef)
+                    nodeRef.events.stateChanged.off(prevStateHandler);
             }
             this.stateHandlers.delete(nodeIdStr);
+            this.stateHandlerNodes.delete(nodeIdStr);
             this.connectedNodes.delete(nodeIdStr);
             this.lastReportTime.delete(nodeIdStr);
             this.connectingPromises.delete(nodeIdStr);

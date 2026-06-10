@@ -127,6 +127,13 @@ export declare class ControllerManager {
      */
     private readonly stateHandlers;
     /**
+     * Maps nodeId → PairedNode for nodes whose stateHandler is active but whose
+     * connectedNodes entry has been evicted (i.e. the node is in Disconnected or
+     * Reconnecting state).  Required so close() can call .off(handler) on the
+     * correct node even when the node is absent from connectedNodes.
+     */
+    private readonly stateHandlerNodes;
+    /**
      * Tracks the last time we received a subscription report (attribute or event)
      * for each node. Used by the health check to detect stale subscriptions on
      * devices with poor/intermittent connectivity (e.g. Thread sensors with RSSI < -90 dBm).
@@ -306,6 +313,27 @@ export declare class ControllerManager {
     /**
      * Attach the stateChanged listener that re-subscribes on reconnect.
      * Extracted so both full and selective subscription paths share the same logic.
+     *
+     * Reconnection strategy
+     * ─────────────────────
+     * On Disconnected/Reconnecting we IMMEDIATELY evict the connectedNodes entry
+     * so that every subsequent reconnect path — whether it arrives via:
+     *   (a) stateChanged(Connected) fired by matter.js auto-reconnect, OR
+     *   (b) the periodic health check (when matter.js never fires Connected), OR
+     *   (c) updateTimeoutHandler (subscription heartbeat timeout)
+     * — is forced to call ctrl.connectNode() for a fresh CASE session.
+     *
+     * Without the eviction, getOrConnectNode() finds the stale entry and calls
+     * activateSubscriptions() on the disconnected PairedNode whose InteractionClient
+     * is bound to the dead session.  Matter.js does not throw — the subscribe call
+     * "succeeds" but no reports ever arrive, leaving the node silently dead.
+     *
+     * Self-detach guard
+     * ─────────────────
+     * The guard uses stateHandlers.get(nodeIdStr) !== stateHandler instead of
+     * !connectedNodes.get(nodeIdStr).  The old guard checked the connectedNodes map,
+     * but we now delete the entry on Disconnect, which would have caused the handler
+     * to self-detach before it could see the subsequent Connected event.
      */
     private setupStateHandler;
     /**
