@@ -20,8 +20,8 @@ Built on [matter.js](https://github.com/project-chip/matter.js) (`@project-chip/
 - **Send commands** to any cluster and endpoint (lock/unlock, on/off, scenes, …)
 - **Read attributes** on demand (lock state, brightness, temperature, …)
 - **Subscribe** to real-time attribute changes and events
+- **Synchronize time** on devices that support the TimeSynchronization cluster (0x0038) — e.g. IKEA ALPSTUGA
 - **Decommission** devices cleanly from the fabric, or force-remove when offline
-- Works on **Raspberry Pi** (Ethernet or WiFi) and any Node.js-capable Linux/macOS host
 - Thread devices reachable via a Thread Border Router (HomePod, Apple TV, OTBR)
 
 ---
@@ -232,6 +232,47 @@ The edit dialog shows **cascading dropdowns** (Device → Endpoint → Cluster �
   "timestamp": "2026-05-01T17:00:00.000Z"
 }
 ```
+
+---
+
+### `matter-time-sync`
+
+Synchronizes the UTC time and timezone on a commissioned Matter device that supports the **TimeSynchronization cluster** (0x0038). Compatible devices include the IKEA ALPSTUGA air quality sensors.
+
+Any incoming message triggers a sync. The node executes three commands in sequence:
+
+1. **`SetTimeZone`** — sends the host UTC offset (DST already included) with `validAt = 0` (valid from Matter epoch start, 2000-01-01). This resets the device's internal time-source state so it is required to accept the subsequent `SetUTCTime` per Matter spec §11.17.9.1. Silently skipped on devices that do not support the TimeZone feature.
+2. **`SetDSTOffset []`** — clears the DST table (DST is already folded into the UTC offset above). Silently skipped on devices without the TimeZone feature.
+3. **`SetUTCTime`** — sends the current time as Unix epoch-microseconds with `granularity = MicrosecondsGranularity` and `timeSource = Admin`. matter.js converts to Matter epoch (2000-01-01) internally before encoding on the wire.
+
+The node creates **no timers**. Use an Inject node set to repeat for scheduled synchronization.
+
+**Input:** any message (triggers the sync).
+
+| Runtime override | Type | Description |
+|---|---|---|
+| `msg.nodeId` | string | Decimal Matter node ID — overrides the device configured in the node properties. |
+
+**Output `msg.payload`:**
+
+```json
+{ "synced": true, "syncedAt": "2026-06-10T12:34:56.789Z" }
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `synced` | boolean | Always `true` on success. |
+| `syncedAt` | string | ISO-8601 UTC timestamp of when the sync completed. |
+
+**`msg.topic`:** `"time-sync"`
+
+**Device dropdown:** the edit dialog only lists devices that have the TimeSynchronization cluster (0x0038) in their discovery data. Devices that have not been discovered yet are also listed (no cluster data to filter on); they will fail at runtime if the cluster is absent.
+
+**Known compatible devices:**
+
+| Device | Cluster | Notes |
+|---|---|---|
+| IKEA ALPSTUGA | 0x0038 | Requires `SetTimeZone` before `SetUTCTime` |
 
 ---
 
