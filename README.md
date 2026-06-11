@@ -9,7 +9,7 @@
 A generic [Matter](https://csa-iot.org/all-solutions/matter/) protocol controller for [Node-RED](https://nodered.org/).  
 Commission and control **any Matter device** — smart locks, lights, sensors — directly from Node-RED flows over IP or Thread.
 
-Built on [matter.js](https://github.com/project-chip/matter.js) (`@project-chip/matter.js`).
+Built on [matter.js](https://github.com/project-chip/matter.js).
 
 ---
 
