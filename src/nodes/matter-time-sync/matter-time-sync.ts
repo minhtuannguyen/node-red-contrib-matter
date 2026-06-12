@@ -78,13 +78,22 @@ module.exports = function (RED: NodeRedAPI) {
       this.status({ fill: "yellow", shape: "dot", text: "syncing…" });
 
       try {
-        // Capture wall-clock once — both UTC time and timezone offset come
-        // from the same Date object, avoiding two separate system calls.
+        // Capture wall-clock once.
         const now = new Date();
-        // getTimezoneOffset() = minutes WEST of UTC → negate + scale to seconds.
-        // DST is already folded in, so no separate DST entry is needed.
-        const offsetSec = -now.getTimezoneOffset() * 60;
         const utcTime = BigInt(now.getTime()) * 1_000n;
+
+        // Full current UTC offset in seconds — DST already folded in.
+        // E.g. CEST (summer, UTC+2) → getTimezoneOffset()=-120 → offsetSec=7200.
+        // We merge DST into the timezone offset and explicitly tell the device
+        // DST = 0 via SetDSTOffset below. This prevents the device from adding
+        // its own built-in DST rules on top of our offset (which would shift
+        // the displayed time by +1 h each day until the next sync).
+        const offsetSec = -now.getTimezoneOffset() * 60;
+
+        // One year from now as Unix epoch µs — used as the DSTOffset validUntil
+        // so the device treats our explicit zero-DST rule as authoritative.
+        // The daily sync will refresh this before it expires.
+        const oneYearUs = BigInt(now.getTime() + 365 * 24 * 3600 * 1_000) * 1_000n;
 
         // -------------------------------------------------------------------
         // Step 1: SetTimeZone (optional — only devices with the TimeZone
@@ -104,12 +113,8 @@ module.exports = function (RED: NodeRedAPI) {
             "setTimeZone",
             {
               timeZone: [{
-                // Total UTC offset in seconds; DST already included.
+                // Full current UTC offset in seconds (DST already merged in).
                 offset: offsetSec,
-                // validAt must encode as Matter epoch 0 ("valid from the
-                // start of the Matter epoch = 2000-01-01").
-                // Pass MATTER_EPOCH_START_UNIX_US so TlvEpochUs subtracts
-                // the offset and writes 0 on the wire.
                 validAt: MATTER_EPOCH_START_UNIX_US,
               }],
             },
@@ -120,9 +125,7 @@ module.exports = function (RED: NodeRedAPI) {
         }
 
         // -------------------------------------------------------------------
-        // Step 2: SetDSTOffset — clear the DST table.
-        // DST is already folded into offsetSec above, so the DST offset is 0.
-        // An empty list tells the device there are no active DST rules.
+        // Step 2: SetDSTOffset — explicitly set DST = 0.
         // Optional: devices without TimeZone feature lack this command.
         // -------------------------------------------------------------------
         try {
@@ -131,7 +134,20 @@ module.exports = function (RED: NodeRedAPI) {
             ROOT_ENDPOINT,
             TIME_SYNC_CLUSTER_ID,
             "setDstOffset",
-            { dstOffset: [] },
+            {
+              // Send an explicit entry with offset=0 rather than an empty list.
+              // An empty list lets devices apply their own built-in DST rules on
+              // top of our timezone offset, adding +1 h each day (confirmed on
+              // IKEA ALPSTUGA). An explicit zero entry with a far-future validUntil
+              // tells the device "controller has set DST = 0, ignore internal rules".
+              // The daily sync refreshes validUntil before it expires.
+              // Reference: github.com/Loweack/Matter-Time-Sync v2.0.1 DST fix.
+              dstOffset: [{
+                offset: 0,
+                validStarting: MATTER_EPOCH_START_UNIX_US, // encodes as 0 on wire
+                validUntil: oneYearUs,
+              }],
+            },
           );
         } catch (dstErr) {
           this.debug(`matter-time-sync: SetDSTOffset not applied for ${nodeId}: ${(dstErr as Error).message}`);
