@@ -32,82 +32,27 @@ const MATTER_EPOCH_START_UNIX_US = 946684800000000n;
 // DST helpers
 // ---------------------------------------------------------------------------
 /**
- * Finds the DST transition moment for a given year using binary search.
- *
- * direction='start': finds the moment clocks spring forward (std → DST).
- * direction='end':   finds the moment clocks fall back (DST → std).
- *
- * Returns null if the timezone has no DST.
- * Precision: within 1 minute.
- *
- * Works for both northern (DST in summer) and southern hemisphere timezones.
- *
- * Confirmed working for IKEA ALPSTUGA — see reddit.com/r/homeassistant/comments/1q0y8nk
- */
-function findDSTTransition(year, direction) {
-    const janOffset = new Date(year, 0, 1).getTimezoneOffset();
-    const julOffset = new Date(year, 6, 1).getTimezoneOffset();
-    if (janOffset === julOffset)
-        return null; // No DST in this timezone
-    const stdOffset = Math.max(janOffset, julOffset); // Less negative = standard time
-    // Search window: first half of year for DST start, second half for DST end.
-    // This works for both hemispheres because binary search doesn't assume direction.
-    let lo;
-    let hi;
-    if (direction === "start") {
-        lo = new Date(year, 0, 1); // Jan 1
-        hi = new Date(year, 6, 15); // Jul 15
-    }
-    else {
-        lo = new Date(year, 6, 15); // Jul 15
-        hi = new Date(year + 1, 0, 1); // Jan 1 next year
-    }
-    // Binary search to within 1-minute precision.
-    while (hi.getTime() - lo.getTime() > 60_000) {
-        const mid = new Date((lo.getTime() + hi.getTime()) / 2);
-        const midIsStd = mid.getTimezoneOffset() === stdOffset;
-        if (direction === "start") {
-            // Looking for std→DST: left of transition = standard, right = DST.
-            if (midIsStd)
-                lo = mid;
-            else
-                hi = mid;
-        }
-        else {
-            // Looking for DST→std: left = DST, right = standard.
-            if (!midIsStd)
-                lo = mid;
-            else
-                hi = mid;
-        }
-    }
-    return hi;
-}
-/**
  * Returns DST information for the current timezone at the given moment.
  *
- * stdOffsetSec:  the standard (non-DST) UTC offset in seconds.
- * dstOffsetSec:  the extra DST offset in seconds (0 if not in DST / no DST timezone).
- * dstStart:      Date when DST became active this year (null if no DST).
- * dstEnd:        Date when DST deactivates this year (null if no DST).
+ * stdOffsetSec:  standard (non-DST) UTC offset in seconds.
+ * dstOffsetSec:  extra DST offset currently active in seconds (0 if not in DST).
+ *
+ * Derived entirely from getTimezoneOffset() on January and July dates —
+ * no binary search, no hemisphere assumptions, no edge cases.
  */
 function getDSTInfo(now) {
     const year = now.getFullYear();
+    // Compare winter (Jan) and summer (Jul) offsets to isolate the standard offset.
+    // getTimezoneOffset() is positive WEST of UTC, negative EAST — taking the
+    // larger value gives the standard (non-DST) offset for any hemisphere.
     const janOffsetMin = new Date(year, 0, 1).getTimezoneOffset();
     const julOffsetMin = new Date(year, 6, 1).getTimezoneOffset();
-    // Standard = larger getTimezoneOffset value (less negative for EAST zones).
     const stdOffsetMin = Math.max(janOffsetMin, julOffsetMin);
     const stdOffsetSec = -stdOffsetMin * 60;
-    // Current total offset (includes DST if active).
+    // Current offset includes DST when active.
     const currentOffsetSec = -now.getTimezoneOffset() * 60;
     const dstOffsetSec = currentOffsetSec - stdOffsetSec;
-    if (janOffsetMin === julOffsetMin) {
-        // No DST in this timezone.
-        return { stdOffsetSec, dstOffsetSec: 0, dstStart: null, dstEnd: null };
-    }
-    const dstStart = findDSTTransition(year, "start");
-    const dstEnd = findDSTTransition(year, "end");
-    return { stdOffsetSec, dstOffsetSec, dstStart, dstEnd };
+    return { stdOffsetSec, dstOffsetSec };
 }
 module.exports = function (RED) {
     function MatterTimeSync(config) {
@@ -147,10 +92,9 @@ module.exports = function (RED) {
                 // Fix confirmed by reddit.com/r/homeassistant/comments/1q0y8nk — the
                 // device requires actual DST transition dates, not a blanket "DST=0".
                 // -------------------------------------------------------------------
-                const { stdOffsetSec, dstOffsetSec, dstStart, dstEnd } = getDSTInfo(now);
+                const { stdOffsetSec, dstOffsetSec } = getDSTInfo(now);
                 this.log(`matter-time-sync node=${nodeId}: UTC=${now.toISOString()} ` +
-                    `stdOffset=${stdOffsetSec}s dstOffset=${dstOffsetSec}s ` +
-                    `dstStart=${dstStart?.toISOString() ?? "n/a"} dstEnd=${dstEnd?.toISOString() ?? "n/a"}`);
+                    `stdOffset=${stdOffsetSec}s dstOffset=${dstOffsetSec}s`);
                 // -------------------------------------------------------------------
                 // Step 1: SetTimeZone — STANDARD offset only, no DST folded in.
                 // Optional: only devices with the TimeZone feature support this.
@@ -162,7 +106,7 @@ module.exports = function (RED) {
                     await controllerNode.manager.invokeCommand(nodeId, ROOT_ENDPOINT, TIME_SYNC_CLUSTER_ID, "setTimeZone", {
                         timeZone: [{
                                 offset: stdOffsetSec, // standard offset, e.g. 3600 for CET
-                                validAt: MATTER_EPOCH_START_UNIX_US, // encodes as 0 (= from epoch start)
+                                validAt: MATTER_EPOCH_START_UNIX_US, // encodes as 0 on wire (= from epoch start)
                             }],
                     });
                     this.log(`matter-time-sync node=${nodeId}: SetTimeZone OK (offset=${stdOffsetSec}s)`);
@@ -171,32 +115,28 @@ module.exports = function (RED) {
                     this.warn(`matter-time-sync node=${nodeId}: SetTimeZone failed: ${tzErr.message}`);
                 }
                 // -------------------------------------------------------------------
-                // Step 2: SetDSTOffset — actual DST transition dates with real offset.
+                // Step 2: SetDSTOffset — real DST offset, open-ended validity.
                 // Optional: only devices with the TimeZone feature support this.
                 //
-                // Send the real DST adjustment (e.g. 3600 for Europe) bounded by the
-                // actual calendar transition dates.  Devices that ignore this command
-                // will apply their own factory DST (also typically 3600) on top of our
-                // standard TimeZone.offset, giving the correct total.
+                // Send the actual DST adjustment (e.g. 3600 for Europe) so the device
+                // computes: LocalTime = UTC + stdOffset + dstOffset = correct local time.
                 //
-                // An empty list or a blanket "offset=0, validStarting=epoch0" entry
-                // is NOT sufficient: the ALPSTUGA ignores it and applies its own DST,
-                // producing a 1-hour-ahead error.
+                // validStarting = Matter epoch 0 (year 2000) means "always active".
+                // validUntil = 1 year from now, refreshed by the daily sync.
+                //
+                // If the device ignores SetDSTOffset and uses its factory DST (also
+                // typically 3600 for European devices), UTC + 3600 + 3600 = UTC+2 = CEST.
+                // Either way the result is correct — this is the key robustness property.
+                //
+                // Previous approach (offset=0) failed because the ALPSTUGA applies its
+                // own built-in DST on top of the timezone offset regardless, adding +1h.
+                // Confirmed: reddit.com/r/homeassistant/comments/1q0y8nk
                 // -------------------------------------------------------------------
                 try {
-                    let dstList;
-                    if (dstStart && dstEnd && dstOffsetSec > 0) {
-                        // DST is active (or will be) this year: send the real entry.
-                        dstList = [{
-                                offset: dstOffsetSec, // e.g. 3600
-                                validStarting: BigInt(dstStart.getTime()) * 1000n, // Unix epoch µs → TlvEpochUs → Matter epoch on wire
-                                validUntil: BigInt(dstEnd.getTime()) * 1000n,
-                            }];
-                    }
-                    else {
-                        // No DST in this timezone, or currently in standard time.
-                        dstList = [];
-                    }
+                    const oneYearUs = BigInt(now.getTime() + 365 * 24 * 3600 * 1_000) * 1000n;
+                    const dstList = dstOffsetSec > 0
+                        ? [{ offset: dstOffsetSec, validStarting: MATTER_EPOCH_START_UNIX_US, validUntil: oneYearUs }]
+                        : [];
                     await controllerNode.manager.invokeCommand(nodeId, ROOT_ENDPOINT, TIME_SYNC_CLUSTER_ID, "setDstOffset", { dstOffset: dstList });
                     this.log(`matter-time-sync node=${nodeId}: SetDSTOffset OK (entries=${dstList.length}, offset=${dstOffsetSec}s)`);
                 }
