@@ -972,9 +972,20 @@ class ControllerManager {
             // Drop the stale entry so getOrConnectNode() opens a fresh CASE session.
             this.connectedNodes.delete(nodeIdStr);
             this.lastReportTime.delete(nodeIdStr);
-            if (this.hasActiveHandlers(nodeIdStr)) {
-                this.getOrConnectNode(nodeIdStr, true).catch(e => logger.warn(`Re-subscribe after timeout failed for ${nodeIdStr}: ${e}`));
-            }
+            // matter.js still believes this PairedNode is "Connected" — that's
+            // exactly why the heartbeat timed out silently instead of firing
+            // stateChanged(Disconnected). Its CASE session, exchange state and
+            // cluster clients (~15 MB) are still live and will never be released
+            // by matter.js on its own. Explicitly disconnect the abandoned node
+            // before opening a replacement, otherwise every heartbeat timeout on a
+            // flaky device (BLE/Thread locks/sensors) leaks another full session.
+            const staleNode = entry.node;
+            (async () => {
+                await staleNode.disconnect().catch(e => logger.debug(`Disconnect after heartbeat timeout failed for ${nodeIdStr}: ${e}`));
+                if (this.hasActiveHandlers(nodeIdStr)) {
+                    await this.getOrConnectNode(nodeIdStr, true).catch(e => logger.warn(`Re-subscribe after timeout failed for ${nodeIdStr}: ${e}`));
+                }
+            })();
         };
     }
     /**
@@ -1080,9 +1091,20 @@ class ControllerManager {
                 // that may have changed IPv6 addresses).
                 this.connectedNodes.delete(nodeIdStr);
                 this.lastReportTime.delete(nodeIdStr);
-                // Attempt reconnection — if this fails, next health check will retry
-                // because we iterate over nodesWithHandlers, not connectedNodes.
-                this.getOrConnectNode(nodeIdStr, true).catch(e => logger.debug(`Health check reconnect failed for ${nodeIdStr}: ${e}`));
+                // matter.js still thinks this PairedNode is "Connected" (that's why
+                // it took the health check, not stateChanged, to notice) — its CASE
+                // session/exchange state and cluster clients (~15 MB) are abandoned
+                // here but never freed by matter.js on its own. Explicitly disconnect
+                // before opening a replacement, otherwise every silence-triggered
+                // reconnect on a flaky device leaks another full session, which for
+                // an intermittently-connected device can happen many times a day.
+                const staleNode = entry.node;
+                (async () => {
+                    await staleNode.disconnect().catch(e => logger.debug(`Disconnect after health-check silence failed for ${nodeIdStr}: ${e}`));
+                    // Attempt reconnection — if this fails, next health check will retry
+                    // because we iterate over nodesWithHandlers, not connectedNodes.
+                    await this.getOrConnectNode(nodeIdStr, true).catch(e => logger.debug(`Health check reconnect failed for ${nodeIdStr}: ${e}`));
+                })();
             }
         }
     }

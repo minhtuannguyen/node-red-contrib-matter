@@ -91,6 +91,13 @@ module.exports = function (RED) {
             };
             this.send(msg);
         };
+        // Tracks whether this node instance has been closed (redeploy/restart)
+        // while an add*Handler()/readInitialState chain is still in flight, so we
+        // never register a handler — or call this.send() — after the point of no
+        // return: `close` only fires once, so anything registered afterwards
+        // would otherwise be a permanent zombie handler inside
+        // controllerNode.manager.
+        let closed = false;
         // Register handlers — this also triggers connection + subscription lazily
         this.status({ fill: "yellow", shape: "dot", text: "connecting…" });
         // Build subscription filters from the node's config. When a clusterId is
@@ -104,8 +111,25 @@ module.exports = function (RED) {
             : undefined;
         controllerNode.manager
             .addAttributeHandler(nodeId, attrHandler, attrFilter)
-            .then(() => controllerNode.manager.addEventHandler(nodeId, evtHandler, evtFilter))
+            .then(() => {
+            if (closed) {
+                // Node closed while addAttributeHandler() was in flight. attrHandler
+                // was already registered synchronously before the await inside it,
+                // so the close handler's removeAttributeHandler() call already
+                // cleaned it up — just stop here instead of registering evtHandler
+                // for a node instance that no longer exists.
+                return;
+            }
+            return controllerNode.manager.addEventHandler(nodeId, evtHandler, evtFilter);
+        })
             .then(async () => {
+            if (closed) {
+                // Node closed while addEventHandler() was in flight — evtHandler
+                // was just registered above (after close already fired, so it will
+                // never be removed otherwise). Undo it now to avoid a zombie handler.
+                controllerNode.manager.removeEventHandler(nodeId, evtHandler);
+                return;
+            }
             this.status({ fill: "green", shape: "dot", text: `subscribed — node ${nodeId}` });
             if (!config.readInitialState)
                 return;
@@ -114,16 +138,24 @@ module.exports = function (RED) {
             const endpoints = entry?.discovery?.endpoints ?? [];
             const now = new Date().toISOString();
             for (const ep of endpoints) {
+                if (closed)
+                    return;
                 if (filterEndpoint !== undefined && ep.endpointId !== filterEndpoint)
                     continue;
                 for (const cl of ep.clusters) {
+                    if (closed)
+                        return;
                     if (filterCluster !== undefined && cl.clusterId !== filterCluster)
                         continue;
                     for (const attrName of cl.attributes) {
+                        if (closed)
+                            return;
                         if (filterAttrName !== undefined && attrName !== filterAttrName)
                             continue;
                         try {
                             const value = await controllerNode.manager.readCachedAttribute(nodeId, ep.endpointId, cl.clusterId, attrName);
+                            if (closed)
+                                return;
                             this.send({
                                 payload: {
                                     type: "attribute",
@@ -146,10 +178,13 @@ module.exports = function (RED) {
             }
         })
             .catch((err) => {
+            if (closed)
+                return;
             this.status({ fill: "red", shape: "dot", text: err.message.slice(0, 40) });
             this.error(`matter-subscribe: failed to subscribe — ${err.message}`);
         });
         this.on("close", (_removed, done) => {
+            closed = true;
             controllerNode.manager.removeAttributeHandler(nodeId, attrHandler);
             controllerNode.manager.removeEventHandler(nodeId, evtHandler);
             done();
