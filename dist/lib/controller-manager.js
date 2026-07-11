@@ -884,12 +884,24 @@ class ControllerManager {
             clusterId: (0, types_1.ClusterId)(clusterId),
         }));
         try {
+            // keepSubscriptions defaults to true, which tells matter.js's
+            // ClientInteraction.subscribe() to leave any subscription already
+            // registered for this peer untouched and simply add another one on
+            // top. activateSubscriptions() re-runs on every reconnect — including
+            // matter.js's own automatic Disconnected -> Connected cycles for a
+            // flaky device, which do NOT go through our explicit disconnect()
+            // cleanup paths — so without this flag every such cycle permanently
+            // leaks another live PeerSubscription (retransmission timers +
+            // attribute/event listener closures capturing this ControllerManager)
+            // that is never closed again. false makes matter.js close the prior
+            // subscription for this peer first, so there is always at most one.
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
             await interactionClient.subscribeMultipleAttributesAndEvents({
                 attributes: attributePaths,
                 events: eventPaths,
                 minIntervalFloorSeconds: 30,
                 maxIntervalCeilingSeconds: 180, // Reduced from 300s for faster recovery
+                keepSubscriptions: false,
                 attributeListener: this.makeAttrListener(nodeIdStr),
                 eventListener: this.makeEvtListener(nodeIdStr),
                 updateTimeoutHandler: this.makeUpdateTimeoutHandler(nodeIdStr),
@@ -926,11 +938,14 @@ class ControllerManager {
         // the caller does NOT mark subscribed=true on failure.
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const interactionClient = node.getInteractionClient();
+        // keepSubscriptions: false — see activateSelectiveSubscription() for why
+        // this is required to avoid leaking a PeerSubscription on every reconnect.
         await interactionClient.subscribeMultipleAttributesAndEvents({
             attributes: [{}], // wildcard — all attributes on all endpoints/clusters
             events: [{}], // wildcard — all events
             minIntervalFloorSeconds: 30,
             maxIntervalCeilingSeconds: 180, // Reduced from 300s for faster recovery
+            keepSubscriptions: false,
             attributeListener: this.makeAttrListener(nodeIdStr),
             eventListener: this.makeEvtListener(nodeIdStr),
             updateTimeoutHandler: this.makeUpdateTimeoutHandler(nodeIdStr),
