@@ -382,6 +382,7 @@ export class ControllerManager {
       // Remove from maps
       this.connectedNodes.delete(nodeIdStr);
       this.lastReportTime.delete(nodeIdStr);
+      this.subscribedFilterSignature.delete(nodeIdStr);
       
       // Disconnect the node
       await entry.node.disconnect().catch((e) => {
@@ -544,6 +545,7 @@ export class ControllerManager {
     this.eventHandlers.clear();
     this.attrHandlerFilters.clear();
     this.eventHandlerFilters.clear();
+    this.subscribedFilterSignature.clear();
     // Cancel any in-flight connection / subscription promises so they don't
     // touch the closed controller after Node-RED redeploys.
     this.connectingPromises.clear();
@@ -979,15 +981,61 @@ export class ControllerManager {
     return this.controller;
   }
 
+  /**
+   * Computes a signature describing which clusters the CURRENT set of
+   * registered handlers for nodeIdStr needs covered: "full" when at least
+   * one handler has no clusterId filter, otherwise a sorted, de-duplicated
+   * list of attribute/event cluster IDs. Used by ensureSubscribed() to
+   * detect when a newly-registered handler's filter is not yet covered by
+   * the live subscription (see subscribedFilterSignature below).
+   */
+  private computeFilterSignature(nodeIdStr: string): string {
+    if (!this.canUseSelectiveSubscription(nodeIdStr)) return "full";
+    const attrIds = new Set<number>();
+    const evtIds = new Set<number>();
+    for (const filter of this.attrHandlerFilters.get(nodeIdStr)?.values() ?? []) {
+      if (filter.clusterId !== undefined) attrIds.add(filter.clusterId);
+    }
+    for (const filter of this.eventHandlerFilters.get(nodeIdStr)?.values() ?? []) {
+      if (filter.clusterId !== undefined) evtIds.add(filter.clusterId);
+    }
+    return `a:${[...attrIds].sort((a, b) => a - b).join(",")}|e:${[...evtIds].sort((a, b) => a - b).join(",")}`;
+  }
+
+  /**
+   * Records which filter signature (see computeFilterSignature) is actually
+   * covered by the most recently completed subscription, per node. Two (or
+   * more) matter-subscribe nodes registered against the same device can race
+   * at startup: if node B's handler is added after node A's subscribe has
+   * already read the filter set and completed, `existing.subscribed` alone
+   * would look "done" and node B's cluster would silently never be
+   * subscribed until the next reconnect (health check / heartbeat timeout).
+   * Comparing signatures here forces a re-subscribe whenever the desired
+   * coverage changes — safe because activateSubscriptions() always uses
+   * `keepSubscriptions: false`, so the previous subscription is cleanly
+   * replaced rather than stacked.
+   */
+  private readonly subscribedFilterSignature = new Map<string, string>();
+
   private async ensureSubscribed(nodeIdStr: string): Promise<void> {
     if (!this.started) return;
     const existing = this.connectedNodes.get(nodeIdStr);
-    if (existing?.subscribed) return;
+    const desiredSignature = this.computeFilterSignature(nodeIdStr);
+    if (existing?.subscribed && this.subscribedFilterSignature.get(nodeIdStr) === desiredSignature) {
+      return;
+    }
 
-    // If another caller is already subscribing for this node, wait for that
-    // instead of sending a second Subscribe Request to the device.
+    // If another caller is already subscribing for this node, wait for it to
+    // finish, then re-evaluate from scratch. The handler that triggered THIS
+    // call may have registered its filter after the in-flight request already
+    // read the filter set — recursing after it settles guarantees the latest
+    // desired signature is always eventually picked up instead of being
+    // silently dropped.
     const inFlight = this.subscribingPromises.get(nodeIdStr);
-    if (inFlight) return inFlight;
+    if (inFlight) {
+      await inFlight.catch(() => {/* already logged where it originated */});
+      return this.ensureSubscribed(nodeIdStr);
+    }
 
     const work = (async () => {
       if (existing) {
@@ -997,6 +1045,7 @@ export class ControllerManager {
         // Not yet connected — connect WITH subscriptions
         await this.getOrConnectNode(nodeIdStr, true);
       }
+      this.subscribedFilterSignature.set(nodeIdStr, desiredSignature);
     })();
 
     const deduped = work.finally(() => {
@@ -1616,6 +1665,7 @@ export class ControllerManager {
     this.eventHandlers.delete(nodeIdStr);
     this.attrHandlerFilters.delete(nodeIdStr);
     this.eventHandlerFilters.delete(nodeIdStr);
+    this.subscribedFilterSignature.delete(nodeIdStr);
     this.connectingPromises.delete(nodeIdStr);
     this.subscribingPromises.delete(nodeIdStr);
 

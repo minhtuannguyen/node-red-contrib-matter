@@ -243,6 +243,29 @@ export declare class ControllerManager {
     addEventHandler(nodeIdStr: string, handler: EventTriggeredHandler, filter?: SubscriptionFilter): Promise<void>;
     removeEventHandler(nodeIdStr: string, handler: EventTriggeredHandler): void;
     private requireController;
+    /**
+     * Computes a signature describing which clusters the CURRENT set of
+     * registered handlers for nodeIdStr needs covered: "full" when at least
+     * one handler has no clusterId filter, otherwise a sorted, de-duplicated
+     * list of attribute/event cluster IDs. Used by ensureSubscribed() to
+     * detect when a newly-registered handler's filter is not yet covered by
+     * the live subscription (see subscribedFilterSignature below).
+     */
+    private computeFilterSignature;
+    /**
+     * Records which filter signature (see computeFilterSignature) is actually
+     * covered by the most recently completed subscription, per node. Two (or
+     * more) matter-subscribe nodes registered against the same device can race
+     * at startup: if node B's handler is added after node A's subscribe has
+     * already read the filter set and completed, `existing.subscribed` alone
+     * would look "done" and node B's cluster would silently never be
+     * subscribed until the next reconnect (health check / heartbeat timeout).
+     * Comparing signatures here forces a re-subscribe whenever the desired
+     * coverage changes — safe because activateSubscriptions() always uses
+     * `keepSubscriptions: false`, so the previous subscription is cleanly
+     * replaced rather than stacked.
+     */
+    private readonly subscribedFilterSignature;
     private ensureSubscribed;
     private activateSubscriptions;
     /**
