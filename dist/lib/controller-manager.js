@@ -476,9 +476,16 @@ class ControllerManager {
         await this.start();
         const existing = this.connectedNodes.get(nodeIdStr);
         if (existing) {
-            if (withSubscription && !existing.subscribed) {
-                await this.activateSubscriptions(nodeIdStr, existing.node);
-                existing.subscribed = true;
+            // Route through ensureSubscribed() — the single serialized entry point
+            // for subscription activation — so two concurrent reconnect triggers
+            // (stateChanged, health check, updateTimeoutHandler) can never each start
+            // their own subscribeMultipleAttributesAndEvents(). Every extra call
+            // creates an independent, self-reconnecting matter.js SustainedSubscription
+            // that keepSubscriptions:false does NOT clean up when the calls race (it
+            // only closes subscriptions already registered when a subscribe begins),
+            // leaking a live subscription loop per race until the process restarts.
+            if (withSubscription) {
+                await this.ensureSubscribed(nodeIdStr);
             }
             return existing.node;
         }
@@ -519,16 +526,11 @@ class ControllerManager {
         }
         const node = await connectWork;
         if (withSubscription) {
-            await this.activateSubscriptions(nodeIdStr, node);
-            // Re-fetch from the map: close() may have cleared connectedNodes during the
-            // await above. Using ! would crash with TypeError in that race; a guarded
-            // get() makes the close-during-subscribe path a clean no-op instead.
-            const sub = this.connectedNodes.get(nodeIdStr);
-            if (sub) {
-                sub.subscribed = true;
-                // Initialize health check timestamp — will be updated by updateReceived()
-                this.lastReportTime.set(nodeIdStr, Date.now());
-            }
+            // Serialized via ensureSubscribed() / subscribingPromises so concurrent
+            // callers share one subscription activation instead of each creating a
+            // separate SustainedSubscription. ensureSubscribed() also sets
+            // subscribed=true and seeds lastReportTime on success.
+            await this.ensureSubscribed(nodeIdStr);
         }
         return node;
     }
@@ -832,13 +834,21 @@ class ControllerManager {
             return this.ensureSubscribed(nodeIdStr);
         }
         const work = (async () => {
-            if (existing) {
-                await this.activateSubscriptions(nodeIdStr, existing.node);
-                existing.subscribed = true;
+            // Connect first WITHOUT a subscription so this method — the single
+            // serialized entry point for subscription activation — is never re-entered
+            // recursively through getOrConnectNode(nodeId, true). Re-fetch the node
+            // from the map because close()/eviction may have run while we awaited an
+            // in-flight promise above.
+            let node = this.connectedNodes.get(nodeIdStr)?.node;
+            if (!node) {
+                node = await this.getOrConnectNode(nodeIdStr, false);
             }
-            else {
-                // Not yet connected — connect WITH subscriptions
-                await this.getOrConnectNode(nodeIdStr, true);
+            await this.activateSubscriptions(nodeIdStr, node);
+            const sub = this.connectedNodes.get(nodeIdStr);
+            if (sub) {
+                sub.subscribed = true;
+                // Seed the health-check timestamp — subsequently refreshed by updateReceived().
+                this.lastReportTime.set(nodeIdStr, Date.now());
             }
             this.subscribedFilterSignature.set(nodeIdStr, desiredSignature);
         })();
@@ -1010,16 +1020,38 @@ class ControllerManager {
         }
     }
     /**
-     * Returns a callback for matter.js `updateTimeoutHandler`. This fires when
-     * the device stops sending reports within `maxIntervalCeiling` seconds —
-     * a silent subscription death that does NOT trigger `stateChanged`. Without
-     * this handler, events simply stop arriving with no error logged anywhere.
+     * Returns a callback for matter.js `updateTimeoutHandler`. matter.js invokes
+     * this via the subscription's generic `closed` hook — which fires on EVERY
+     * close, not only a real heartbeat timeout:
      *
-     * On timeout we drop the cached node entry and reconnect, mirroring the
-     * logic already used for an explicit Disconnected → Connected cycle.
+     *   1. Genuine timeout   — device stopped sending reports (what we want to act on).
+     *   2. Self-inflicted    — our own `keepSubscriptions: false` re-subscribe closes
+     *                          the previous PeerSubscription for this peer before
+     *                          installing the new one (ClientInteraction.subscribe).
+     *   3. Shutdown          — controller.close() tears every subscription down.
+     *
+     * Only case (1) should trigger a reconnect. Cases (2) and (3) are self-inflicted:
+     * a subscribe/connect is already in flight (subscribingPromises / connectingPromises
+     * is populated the moment the replacement close fires, because that close happens
+     * synchronously INSIDE our own subscribeMultipleAttributesAndEvents call), or the
+     * controller is stopping. Acting on those would tear down the fresh connection we
+     * just created and immediately re-subscribe — which closes the next subscription,
+     * firing this handler again, spiralling into a self-perpetuating reconnect loop
+     * that allocates a new CASE session + PeerSubscription + listener closures on every
+     * turn. On an unstable connection (frequent reconnects) that churn is a steady heap
+     * leak. The guard below distinguishes a real timeout (nothing in flight, controller
+     * running) from a self-inflicted replacement/shutdown close.
      */
     makeUpdateTimeoutHandler(nodeIdStr) {
         return () => {
+            // Self-inflicted close (re-subscribe replacement or shutdown) — not a real
+            // device timeout. Ignore to avoid a runaway reconnect loop that leaks
+            // sessions/subscriptions on flaky connections.
+            if (!this.started ||
+                this.subscribingPromises.has(nodeIdStr) ||
+                this.connectingPromises.has(nodeIdStr)) {
+                return;
+            }
             logger.warn(`Subscription heartbeat timed out for node ${nodeIdStr} — resubscribing`);
             const entry = this.connectedNodes.get(nodeIdStr);
             if (!entry)

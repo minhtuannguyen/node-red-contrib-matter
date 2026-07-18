@@ -295,13 +295,27 @@ export declare class ControllerManager {
      */
     private activateFullSubscription;
     /**
-     * Returns a callback for matter.js `updateTimeoutHandler`. This fires when
-     * the device stops sending reports within `maxIntervalCeiling` seconds —
-     * a silent subscription death that does NOT trigger `stateChanged`. Without
-     * this handler, events simply stop arriving with no error logged anywhere.
+     * Returns a callback for matter.js `updateTimeoutHandler`. matter.js invokes
+     * this via the subscription's generic `closed` hook — which fires on EVERY
+     * close, not only a real heartbeat timeout:
      *
-     * On timeout we drop the cached node entry and reconnect, mirroring the
-     * logic already used for an explicit Disconnected → Connected cycle.
+     *   1. Genuine timeout   — device stopped sending reports (what we want to act on).
+     *   2. Self-inflicted    — our own `keepSubscriptions: false` re-subscribe closes
+     *                          the previous PeerSubscription for this peer before
+     *                          installing the new one (ClientInteraction.subscribe).
+     *   3. Shutdown          — controller.close() tears every subscription down.
+     *
+     * Only case (1) should trigger a reconnect. Cases (2) and (3) are self-inflicted:
+     * a subscribe/connect is already in flight (subscribingPromises / connectingPromises
+     * is populated the moment the replacement close fires, because that close happens
+     * synchronously INSIDE our own subscribeMultipleAttributesAndEvents call), or the
+     * controller is stopping. Acting on those would tear down the fresh connection we
+     * just created and immediately re-subscribe — which closes the next subscription,
+     * firing this handler again, spiralling into a self-perpetuating reconnect loop
+     * that allocates a new CASE session + PeerSubscription + listener closures on every
+     * turn. On an unstable connection (frequent reconnects) that churn is a steady heap
+     * leak. The guard below distinguishes a real timeout (nothing in flight, controller
+     * running) from a self-inflicted replacement/shutdown close.
      */
     private makeUpdateTimeoutHandler;
     /**
