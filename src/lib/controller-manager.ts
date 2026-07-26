@@ -296,6 +296,74 @@ export class ControllerManager {
    */
   private healthCheckInterval?: ReturnType<typeof setInterval>;
 
+  /**
+   * Consecutive failed (re)connect attempts per node, used to back off retry
+   * frequency for chronically-unstable devices (e.g. a battery Nuki lock with
+   * a flaky BLE/Thread hop). Without this, a permanently-troubled device gets
+   * a fresh CASE-handshake attempt every single 60s health-check tick forever
+   * — each attempt allocates exchange/crypto objects that are individually
+   * disposed on failure but, under constant churn, keep the V8 heap "warm"
+   * and prevent it from settling back down between GC cycles, which shows up
+   * as a slow upward drift in heap graphs even though nothing is technically
+   * un-freeable. Backing off the retry interval for a repeatedly-failing node
+   * reduces that churn while still recovering quickly for a healthy device.
+   */
+  private readonly reconnectFailureCount = new Map<string, number>();
+
+  /** Earliest wall-clock time (ms) the next reconnect attempt is allowed for a node. */
+  private readonly nextReconnectAllowedAt = new Map<string, number>();
+
+  /** Base health-check cadence — kept in sync with startHealthCheck()'s interval. */
+  private static readonly HEALTH_CHECK_INTERVAL_MS = 60_000;
+
+  /** Upper bound on backoff so a device that comes back online is retried at least this often. */
+  private static readonly MAX_RECONNECT_BACKOFF_MS = 15 * 60_000;
+
+  /**
+   * Returns true if a reconnect attempt for `nodeIdStr` should be skipped because
+   * we are still within its backoff window from previous consecutive failures.
+   */
+  private isReconnectBackedOff(nodeIdStr: string, now: number): boolean {
+    const nextAllowed = this.nextReconnectAllowedAt.get(nodeIdStr);
+    return nextAllowed !== undefined && now < nextAllowed;
+  }
+
+  /** Clears backoff state after a successful (re)connect + subscribe. */
+  private resetReconnectBackoff(nodeIdStr: string): void {
+    this.reconnectFailureCount.delete(nodeIdStr);
+    this.nextReconnectAllowedAt.delete(nodeIdStr);
+  }
+
+  /**
+   * Records a failed (re)connect attempt and schedules the next allowed retry
+   * using exponential backoff off the base health-check cadence, capped at
+   * MAX_RECONNECT_BACKOFF_MS: 60s, 120s, 240s, 480s, 900s (cap), ...
+   */
+  private scheduleReconnectBackoff(nodeIdStr: string): void {
+    const failures = (this.reconnectFailureCount.get(nodeIdStr) ?? 0) + 1;
+    this.reconnectFailureCount.set(nodeIdStr, failures);
+    const delay = Math.min(
+      ControllerManager.HEALTH_CHECK_INTERVAL_MS * 2 ** (failures - 1),
+      ControllerManager.MAX_RECONNECT_BACKOFF_MS,
+    );
+    this.nextReconnectAllowedAt.set(nodeIdStr, Date.now() + delay);
+  }
+
+  /**
+   * Attempts a reconnect+subscribe for `nodeIdStr`, resetting backoff on success
+   * and scheduling the next backed-off attempt on failure. Used by performHealthCheck()
+   * so repeated failures for a chronically-unstable device space themselves out
+   * instead of retrying every single health-check tick forever.
+   */
+  private attemptBackedOffReconnect(nodeIdStr: string, logPrefix: string): void {
+    this.getOrConnectNode(nodeIdStr, true)
+      .then(() => this.resetReconnectBackoff(nodeIdStr))
+      .catch((e) => {
+        this.scheduleReconnectBackoff(nodeIdStr);
+        logger.debug(`${logPrefix} failed for ${nodeIdStr}: ${e}`);
+      });
+  }
+
   /** Persisted registry of commissioned devices with their discovery data */
   private registry: DeviceRegistry = {};
   private registryPath = "";
@@ -383,6 +451,7 @@ export class ControllerManager {
       this.connectedNodes.delete(nodeIdStr);
       this.lastReportTime.delete(nodeIdStr);
       this.subscribedFilterSignature.delete(nodeIdStr);
+      this.resetReconnectBackoff(nodeIdStr);
       
       // Disconnect the node
       await entry.node.disconnect().catch((e) => {
@@ -546,6 +615,8 @@ export class ControllerManager {
     this.attrHandlerFilters.clear();
     this.eventHandlerFilters.clear();
     this.subscribedFilterSignature.clear();
+    this.reconnectFailureCount.clear();
+    this.nextReconnectAllowedAt.clear();
     // Cancel any in-flight connection / subscription promises so they don't
     // touch the closed controller after Node-RED redeploys.
     this.connectingPromises.clear();
@@ -1349,6 +1420,12 @@ export class ControllerManager {
           continue;
         }
 
+        // Skip if this node has failed repeatedly and is still within its
+        // backoff window — see reconnectFailureCount/nextReconnectAllowedAt.
+        if (this.isReconnectBackedOff(nodeIdStr, now)) {
+          continue;
+        }
+
         if (entry && !entry.subscribed) {
           // Node is connected but subscription was lost or never established.
           // This happens when:
@@ -1361,9 +1438,7 @@ export class ControllerManager {
           // Re-subscribe using the existing connected PairedNode so we don't
           // need another ctrl.connectNode() round-trip.
           logger.info(`Health check: node ${nodeIdStr} connected but not subscribed — re-subscribing`);
-          this.getOrConnectNode(nodeIdStr, true).catch(e =>
-            logger.debug(`Health check re-subscribe failed for ${nodeIdStr}: ${e}`)
-          );
+          this.attemptBackedOffReconnect(nodeIdStr, "Health check re-subscribe");
           continue;
         }
 
@@ -1380,9 +1455,7 @@ export class ControllerManager {
         }
 
         logger.info(`Health check: node ${nodeIdStr} not connected, attempting reconnection`);
-        this.getOrConnectNode(nodeIdStr, true).catch(e =>
-          logger.debug(`Health check reconnect attempt failed for ${nodeIdStr}: ${e}`)
-        );
+        this.attemptBackedOffReconnect(nodeIdStr, "Health check reconnect attempt");
         continue;
       }
 
@@ -1399,6 +1472,12 @@ export class ControllerManager {
         // Skip if connection or subscription already in progress
         if (this.connectingPromises.has(nodeIdStr) || this.subscribingPromises.has(nodeIdStr)) {
           logger.debug(`Health check: skipping ${nodeIdStr}, reconnection already in progress`);
+          continue;
+        }
+
+        // Skip if this node has failed repeatedly and is still within its
+        // backoff window — see reconnectFailureCount/nextReconnectAllowedAt.
+        if (this.isReconnectBackedOff(nodeIdStr, now)) {
           continue;
         }
 
@@ -1435,10 +1514,8 @@ export class ControllerManager {
             logger.debug(`Disconnect after health-check silence failed for ${nodeIdStr}: ${e}`),
           );
           // Attempt reconnection — if this fails, next health check will retry
-          // because we iterate over nodesWithHandlers, not connectedNodes.
-          await this.getOrConnectNode(nodeIdStr, true).catch(e =>
-            logger.debug(`Health check reconnect failed for ${nodeIdStr}: ${e}`)
-          );
+          // (subject to backoff) because we iterate over nodesWithHandlers, not connectedNodes.
+          this.attemptBackedOffReconnect(nodeIdStr, "Health check reconnect");
         })();
       }
     }
@@ -1703,6 +1780,7 @@ export class ControllerManager {
     this.subscribedFilterSignature.delete(nodeIdStr);
     this.connectingPromises.delete(nodeIdStr);
     this.subscribingPromises.delete(nodeIdStr);
+    this.resetReconnectBackoff(nodeIdStr);
 
     // tryDecommissioning = !force: properly removes the fabric entry on the
     // device when reachable; falls back to local-only removal on error.
@@ -1753,6 +1831,9 @@ export class ControllerManager {
       this.lastReportTime.delete(nodeIdStr);
       this.connectingPromises.delete(nodeIdStr);
       this.subscribingPromises.delete(nodeIdStr);
+      // Manual, user-triggered rediscovery — clear any accumulated reconnect
+      // backoff so this explicit request isn't silently skipped/delayed.
+      this.resetReconnectBackoff(nodeIdStr);
 
       const hasHandlers = this.hasActiveHandlers(nodeIdStr);
 

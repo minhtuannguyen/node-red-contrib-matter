@@ -145,6 +145,45 @@ export declare class ControllerManager {
      * sending reports without triggering Matter.js state changes.
      */
     private healthCheckInterval?;
+    /**
+     * Consecutive failed (re)connect attempts per node, used to back off retry
+     * frequency for chronically-unstable devices (e.g. a battery Nuki lock with
+     * a flaky BLE/Thread hop). Without this, a permanently-troubled device gets
+     * a fresh CASE-handshake attempt every single 60s health-check tick forever
+     * — each attempt allocates exchange/crypto objects that are individually
+     * disposed on failure but, under constant churn, keep the V8 heap "warm"
+     * and prevent it from settling back down between GC cycles, which shows up
+     * as a slow upward drift in heap graphs even though nothing is technically
+     * un-freeable. Backing off the retry interval for a repeatedly-failing node
+     * reduces that churn while still recovering quickly for a healthy device.
+     */
+    private readonly reconnectFailureCount;
+    /** Earliest wall-clock time (ms) the next reconnect attempt is allowed for a node. */
+    private readonly nextReconnectAllowedAt;
+    /** Base health-check cadence — kept in sync with startHealthCheck()'s interval. */
+    private static readonly HEALTH_CHECK_INTERVAL_MS;
+    /** Upper bound on backoff so a device that comes back online is retried at least this often. */
+    private static readonly MAX_RECONNECT_BACKOFF_MS;
+    /**
+     * Returns true if a reconnect attempt for `nodeIdStr` should be skipped because
+     * we are still within its backoff window from previous consecutive failures.
+     */
+    private isReconnectBackedOff;
+    /** Clears backoff state after a successful (re)connect + subscribe. */
+    private resetReconnectBackoff;
+    /**
+     * Records a failed (re)connect attempt and schedules the next allowed retry
+     * using exponential backoff off the base health-check cadence, capped at
+     * MAX_RECONNECT_BACKOFF_MS: 60s, 120s, 240s, 480s, 900s (cap), ...
+     */
+    private scheduleReconnectBackoff;
+    /**
+     * Attempts a reconnect+subscribe for `nodeIdStr`, resetting backoff on success
+     * and scheduling the next backed-off attempt on failure. Used by performHealthCheck()
+     * so repeated failures for a chronically-unstable device space themselves out
+     * instead of retrying every single health-check tick forever.
+     */
+    private attemptBackedOffReconnect;
     /** Persisted registry of commissioned devices with their discovery data */
     private registry;
     private registryPath;
